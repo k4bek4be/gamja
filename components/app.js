@@ -170,6 +170,7 @@ export default class App extends Component {
 		this.saveReceipts = debounce(this.saveReceipts.bind(this), 500);
 
 		this.receipts = store.receipts.load();
+		this.bufferStore = new store.Buffer();
 
 		configPromise.then((config) => {
 			this.handleConfig(config);
@@ -263,14 +264,31 @@ export default class App extends Component {
 		}, callback);
 	}
 
+	syncBufferUnread(serverID, name) {
+		let client = this.clients.get(serverID);
+
+		let stored = this.bufferStore.get({ name, server: client.params });
+		if (client.enabledCaps["draft/chathistory"] && stored) {
+			this.setBufferState({ server: serverID, name }, { unread: stored.unread });
+		}
+		if (!stored) {
+			this.bufferStore.put({
+				name,
+				server: client.params,
+				unread: Unread.NONE,
+			});
+		}
+	}
+
 	createBuffer(serverID, name) {
+		let client = this.clients.get(serverID);
 		let id = null;
 		this.setState((state) => {
-			let client = this.clients.get(serverID);
 			let updated;
 			[id, updated] = State.createBuffer(state, name, serverID, client);
 			return updated;
 		});
+		this.syncBufferUnread(serverID, name);
 		return id;
 	}
 
@@ -303,6 +321,13 @@ export default class App extends Component {
 			}
 			let lastMsg = buf.messages[buf.messages.length - 1];
 			this.setReceipt(buf.name, ReceiptType.READ, lastMsg);
+
+			let client = this.clients.get(buf.server);
+			this.bufferStore.put({
+				name: buf.name,
+				server: client.params,
+				unread: Unread.NONE,
+			});
 		});
 	}
 
@@ -340,7 +365,7 @@ export default class App extends Component {
 		let last = null;
 		this.receipts.forEach((receipts, target) => {
 			let delivery = receipts[type];
-			if (target == "*" || !delivery || !delivery.time) {
+			if (!delivery || !delivery.time) {
 				return;
 			}
 			if (!last || delivery.time > last.time) {
@@ -440,12 +465,17 @@ export default class App extends Component {
 			// TODO: set unread if scrolled up
 			let unread = buf.unread;
 			let lastReadReceipt = buf.lastReadReceipt;
-			if (this.state.activeBuffer != buf.id) {
+			if (this.state.activeBuffer !== buf.id) {
 				unread = Unread.union(unread, msgUnread);
 			} else {
 				this.setReceipt(bufName, ReceiptType.READ, msg);
 				lastReadReceipt = this.getReceipt(bufName, ReceiptType.READ);
 			}
+			this.bufferStore.put({
+				name: buf.name,
+				server: client.params,
+				unread,
+			});
 			return { unread, lastReadReceipt };
 		});
 	}
@@ -540,15 +570,21 @@ export default class App extends Component {
 				});
 			}
 
-			let lastReceipt = this.latestReceipt(ReceiptType.READ);
+			// Restore opened user query buffers
+			for (let buf of this.bufferStore.list(client.params)) {
+				if (buf.name === "*" || client.isChannel(buf.name)) {
+					continue;
+				}
+				this.createBuffer(serverID, buf.name);
+				client.who(buf.name);
+			}
+
+			let lastReceipt = this.latestReceipt(ReceiptType.DELIVERED);
 			if (lastReceipt && lastReceipt.time && client.enabledCaps["draft/chathistory"] && (!client.enabledCaps["soju.im/bouncer-networks"] || client.params.bouncerNetwork)) {
 				let now = irc.formatDate(new Date());
 				client.fetchHistoryTargets(now, lastReceipt.time).then((targets) => {
 					targets.forEach((target) => {
-						let from = this.getReceipt(target, ReceiptType.READ);
-						if (!from) {
-							from = lastReceipt;
-						}
+						let from = lastReceipt;
 						let to = { time: msg.tags.time || irc.formatDate(new Date()) };
 						this.fetchBacklog(client, target.name, from, to);
 					});
@@ -588,6 +624,8 @@ export default class App extends Component {
 			break;
 		case "JOIN":
 			channel = msg.params[0];
+
+			this.syncBufferUnread(serverID, channel);
 
 			if (!client.isMyNick(msg.prefix.name)) {
 				this.addMessage(serverID, channel, msg);
@@ -796,7 +834,7 @@ export default class App extends Component {
 
 	fetchBacklog(client, target, after, before) {
 		client.fetchHistoryBetween(target, after, before, CHATHISTORY_MAX_SIZE).catch((err) => {
-			this.setState({ error: "Failed to fetch history for '" + taregt + "': " + err });
+			this.setState({ error: "Failed to fetch history for '" + target + "': " + err });
 			this.receipts.delete(channel);
 			this.saveReceipts();
 		});
@@ -869,9 +907,12 @@ export default class App extends Component {
 				for (let serverID of this.clients.keys()) {
 					this.close({ server: serverID, name: SERVER_BUFFER });
 				}
+				this.bufferStore.clear();
+			} else {
+				this.bufferStore.clear(client.params);
 			}
 
-			// TODO: only clear local storage if this server is stored there
+			// TODO: only clear autoconnect if this server is stored there
 			if (buf.server == 1) {
 				store.autoconnect.put(null);
 			}
@@ -889,6 +930,8 @@ export default class App extends Component {
 
 			this.receipts.delete(buf.name);
 			this.saveReceipts();
+
+			this.bufferStore.delete({ name: buf.name, server: client.params });
 			break;
 		}
 	}
