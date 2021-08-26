@@ -305,11 +305,11 @@ export default class App extends Component {
 				return;
 			}
 
-			let lastReadReceipt = this.getReceipt(buf.name, ReceiptType.READ);
+			let prevReadReceipt = this.getReceipt(buf.name, ReceiptType.READ);
 			// TODO: only mark as read if user scrolled at the bottom
 			this.setBufferState(buf.id, {
 				unread: Unread.NONE,
-				lastReadReceipt,
+				prevReadReceipt,
 			});
 
 			if (this.buffer.current) {
@@ -364,6 +364,9 @@ export default class App extends Component {
 	latestReceipt(type) {
 		let last = null;
 		this.receipts.forEach((receipts, target) => {
+			if (target === "*") {
+				return;
+			}
 			let delivery = receipts[type];
 			if (!delivery || !delivery.time) {
 				return;
@@ -453,7 +456,9 @@ export default class App extends Component {
 			});
 		}
 
-		if (!client.isMyNick(msg.prefix.name) && (msg.command != "PART" && msg.comand != "QUIT")) {
+		// Open a new buffer if the message doesn't come from me or is a
+		// self-message
+		if ((!client.isMyNick(msg.prefix.name) || client.isMyNick(bufName)) && (msg.command != "PART" && msg.comand != "QUIT")) {
 			this.createBuffer(serverID, bufName);
 		}
 
@@ -464,19 +469,17 @@ export default class App extends Component {
 		this.setBufferState(bufID, (buf) => {
 			// TODO: set unread if scrolled up
 			let unread = buf.unread;
-			let lastReadReceipt = buf.lastReadReceipt;
 			if (this.state.activeBuffer !== buf.id) {
 				unread = Unread.union(unread, msgUnread);
 			} else {
 				this.setReceipt(bufName, ReceiptType.READ, msg);
-				lastReadReceipt = this.getReceipt(bufName, ReceiptType.READ);
 			}
 			this.bufferStore.put({
 				name: buf.name,
 				server: client.params,
 				unread,
 			});
-			return { unread, lastReadReceipt };
+			return { unread };
 		});
 	}
 
@@ -577,6 +580,7 @@ export default class App extends Component {
 				}
 				this.createBuffer(serverID, buf.name);
 				client.who(buf.name);
+				client.monitor(buf.name);
 			}
 
 			let lastReceipt = this.latestReceipt(ReceiptType.DELIVERED);
@@ -625,9 +629,9 @@ export default class App extends Component {
 		case "JOIN":
 			channel = msg.params[0];
 
-			this.syncBufferUnread(serverID, channel);
-
-			if (!client.isMyNick(msg.prefix.name)) {
+			if (client.isMyNick(msg.prefix.name)) {
+				this.syncBufferUnread(serverID, channel);
+			} else {
 				this.addMessage(serverID, channel, msg);
 			}
 			if (channel == this.switchToChannel) {
@@ -785,6 +789,8 @@ export default class App extends Component {
 		case irc.RPL_TOPICWHOTIME:
 		case irc.RPL_NAMREPLY:
 		case irc.RPL_ENDOFNAMES:
+		case irc.RPL_MONONLINE:
+		case irc.RPL_MONOFFLINE:
 		case "AWAY":
 		case "SETNAME":
 		case "CAP":
@@ -853,6 +859,7 @@ export default class App extends Component {
 			client.send({ command: "JOIN", params: [target] });
 		} else {
 			client.who(target);
+			client.monitor(target);
 			this.createBuffer(serverID, target);
 			this.switchBuffer({ server: serverID, name: target });
 		}
@@ -927,6 +934,8 @@ export default class App extends Component {
 				buffers.delete(buf.id);
 				return { buffers };
 			});
+
+			client.unmonitor(buf.name);
 
 			this.receipts.delete(buf.name);
 			this.saveReceipts();
@@ -1066,6 +1075,17 @@ export default class App extends Component {
 		if (prefix.startsWith("/")) {
 			let repl = fromList(Object.keys(commands), prefix.slice(1));
 			return repl.map(cmd => "/" + cmd);
+		}
+
+		// TODO: consider using the CHANTYPES ISUPPORT token here
+		if (prefix.startsWith("#")) {
+			let chanNames = [];
+			for (const buf of this.state.buffers.values()) {
+				if (buf.name.startsWith("#")) {
+					chanNames.push(buf.name);
+				}
+			}
+			return fromList(chanNames, prefix);
 		}
 
 		let buf = this.state.buffers.get(this.state.activeBuffer);
