@@ -2,6 +2,7 @@ import { html, Component } from "../lib/index.js";
 import linkify from "../lib/linkify.js";
 import { strip as stripANSI } from "../lib/ansi.js";
 import { BufferType, ServerStatus, getServerName } from "../state.js";
+import * as irc from "../lib/irc.js";
 
 const UserStatus = {
 	HERE: "here",
@@ -125,23 +126,40 @@ export default function BufferHeader(props) {
 		`;
 		break;
 	case BufferType.NICK:
-		if (props.buffer.who) {
-			let who = props.buffer.who;
-
-			let realname = stripANSI(who.realname || "");
-
+		if (props.user) {
 			let status = UserStatus.HERE;
-			if (who.away) {
+			if (props.user.offline) {
+				status = UserStatus.OFFLINE;
+			} else if (props.user.away) {
 				status = UserStatus.GONE;
 			}
-			if (props.buffer.offline) {
-				status = UserStatus.OFFLINE;
+
+			let realname = props.buffer.name;
+			if (irc.isMeaningfulRealname(props.user.realname, props.buffer.name)) {
+				realname = stripANSI(props.user.realname || "");
 			}
 
-			description = html`<${NickStatus} status=${status}/> ${realname} (${who.username}@${who.hostname})`;
-		} else if (props.buffer.offline) {
-			// User is offline, but we don't have WHO information
-			description = html`<${NickStatus} status=${UserStatus.OFFLINE}/> ${props.buffer.name}`;
+			let details = [];
+			if (props.user.username && props.user.hostname) {
+				details.push(`${props.user.username}@${props.user.hostname}`);
+			}
+			if (props.user.account) {
+				if (props.user.account === props.buffer.name) {
+					details.push("authenticated");
+				} else {
+					details.push(`authenticated as ${props.user.account}`);
+				}
+			} else if (props.server.isupport.has("MONITOR") && props.server.isupport.has("WHOX")) {
+				// If the server supports MONITOR and WHOX, we can faithfully
+				// keep user.account up-to-date for user queries
+				details.push("unauthenticated");
+			}
+			if (props.user.operator) {
+				details.push("server operator");
+			}
+			details = details.length > 0 ? `(${details.join(", ")})` : null;
+
+			description = html`<${NickStatus} status=${status}/> ${realname} ${details}`;
 		}
 
 		actions = html`

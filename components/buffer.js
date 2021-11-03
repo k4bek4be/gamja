@@ -36,7 +36,14 @@ function Timestamp({ date, url }) {
 	let ss = date.getSeconds().toString().padStart(2, "0");
 	let timestamp = `${hh}:${mm}:${ss}`;
 	return html`
-		<a href=${url} class="timestamp" onClick=${(event) => event.preventDefault()}>${timestamp}</a>
+		<a
+			href=${url}
+			class="timestamp"
+			title=${date.toLocaleString()}
+			onClick=${(event) => event.preventDefault()}
+		>
+			${timestamp}
+		</a>
 	`;
 }
 
@@ -179,6 +186,10 @@ class LogLine extends Component {
 				`;
 			}
 			break;
+		case irc.RPL_WELCOME:
+			let nick = msg.params[0];
+			content = html`Connected to server, your nickname is ${nick}`;
+			break;
 		case irc.RPL_INVITING:
 			invitee = msg.params[1];
 			content = html`${createNick(invitee)} has been invited to the channel`;
@@ -186,6 +197,28 @@ class LogLine extends Component {
 		case irc.RPL_MOTD:
 			lineClass = "motd";
 			content = linkify(stripANSI(msg.params[1]), onChannelClick);
+			break;
+		case irc.RPL_LOGGEDIN:
+			let account = msg.params[2];
+			content = html`You are now authenticated as ${account}`;
+			break;
+		case irc.RPL_LOGGEDOUT:
+			content = html`You are now unauthenticated`;
+			break;
+		case irc.RPL_UMODEIS:
+			let mode = msg.params[1];
+			if (mode) {
+				content = html`Your user mode is ${mode}`;
+			} else {
+				content = html`You have no user mode`;
+			}
+			break;
+		case irc.RPL_CHANNELMODEIS:
+			content = html`Channel mode is ${msg.params.slice(2).join(" ")}`;
+			break;
+		case irc.RPL_CREATIONTIME:
+			let date = new Date(parseInt(msg.params[2], 10) * 1000);
+			content = html`Channel was created on ${date.toLocaleString()}`;
 			break;
 		default:
 			if (irc.isError(msg.command) && msg.command != irc.ERR_NOMOTD) {

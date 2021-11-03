@@ -48,9 +48,9 @@ location /socket {
 }
 ```
 
-If you are unable to configure the proxy timeout accordingly, you can set the
-`server.ping` option in `config.json` to an interval, in seconds, between which
-gamja will send opportunistic pings.
+If you are unable to configure the proxy timeout accordingly, or if your IRC
+server doesn't send PINGs, you can set the `server.ping` option in
+`config.json` (see below).
 
 ### Development server
 
@@ -61,6 +61,13 @@ Start your IRC WebSocket server, e.g. on port 8080. Then run:
 
 This will start a development HTTP server for gamja. Connect to it and append
 `?server=ws://localhost:8080` to the URL.
+
+### Production build
+
+Optionally, [Parcel] can be used to build a minified version of gamja. Install
+Parcel and then run:
+
+    parcel build
 
 ## Query parameters
 
@@ -87,9 +94,14 @@ gamja default settings can be set using a `config.json` file at the root:
 		"autojoin": "#gamja",
 		// Controls how the password UI is presented to the user. Set to
 		// "mandatory" to require a password, "optional" to accept one but not
-		// require it, and "disabled" to never ask for a password. Defaults to
-		// "optional".
+		// require it, "disabled" to never ask for a password, or "external" to
+		// use SASL EXTERNAL. Defaults to "optional".
 		"auth": "optional",
+		// Default nickname (string).
+		"nick": "asdf",
+		// Don't display the login UI, immediately connect to the server
+		// (boolean).
+		"autoconnect": true,
 		// Interval in seconds to send PING commands (number). Set to 0 to
 		// disable. Enabling PINGs can have an impact on client power usage and
 		// should only be enabled if necessary.
@@ -114,3 +126,4 @@ Copyright (C) 2020 The gamja Contributors
 [webircgateway]: https://github.com/kiwiirc/webircgateway
 [mailing list]: https://lists.sr.ht/~emersion/public-inbox
 [issue tracker]: https://todo.sr.ht/~emersion/gamja
+[Parcel]: https://parceljs.org

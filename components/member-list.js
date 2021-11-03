@@ -1,6 +1,8 @@
 import { html, Component } from "../lib/index.js";
 import { getNickURL } from "../state.js";
+import { strip as stripANSI } from "../lib/ansi.js";
 import Membership from "./membership.js";
+import * as irc from "../lib/irc.js";
 
 class MemberItem extends Component {
 	constructor(props) {
@@ -38,11 +40,35 @@ class MemberItem extends Component {
 				</span>
 			`;
 		};
+
+		let title = null;
+		let user = this.props.user;
+		if (user) {
+			let mask = "";
+			if (user.username && user.hostname) {
+				mask = `${user.username}@${user.hostname}`;
+			}
+
+			if (irc.isMeaningfulRealname(user.realname, this.props.nick)) {
+				title = stripANSI(user.realname);
+				if (mask) {
+					title = `${title} (${mask})`;
+				}
+			} else {
+				title = mask;
+			}
+
+			if (user.account) {
+				title += `\nAuthenticated as ${user.account}`;
+			}
+		}
+
 		return html`
 			<li>
 				<a
 					href=${getNickURL(this.props.nick)}
 					class="nick"
+					title=${title}
 					onClick=${this.handleClick}
 				>
 					<${Membership} value=${this.props.membership}/>
@@ -84,6 +110,7 @@ export default class MemberList extends Component {
 						key=${nick}
 						nick=${nick}
 						membership=${membership}
+						user=${this.props.users.get(nick)}
 						onClick=${() => this.props.onNickClick(nick)}
 					/>
 				`)}

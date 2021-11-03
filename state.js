@@ -64,19 +64,25 @@ export function getMessageURL(buf, msg) {
 }
 
 export function getServerName(server, bouncerNetwork, isBouncer) {
-	if (bouncerNetwork && bouncerNetwork.name) {
+	let netName = server.isupport.get("NETWORK");
+
+	if (bouncerNetwork && bouncerNetwork.name && bouncerNetwork.name !== bouncerNetwork.host) {
+		// User has picked a custom name for the network, use that
 		return bouncerNetwork.name;
 	}
-	if (isBouncer) {
-		return "bouncer";
-	}
 
-	let netName = server.isupport.get("NETWORK");
 	if (netName) {
+		// Server has specified a name
 		return netName;
 	}
 
-	return "server";
+	if (bouncerNetwork) {
+		return bouncerNetwork.name || bouncerNetwork.host || "server";
+	} else if (isBouncer) {
+		return "bouncer";
+	} else {
+		return "server";
+	}
 }
 
 function updateState(state, updater) {
@@ -161,6 +167,13 @@ let lastBufferID = 0;
 let lastMessageKey = 0;
 
 export const State = {
+	create() {
+		return {
+			servers: new Map(),
+			buffers: new Map(),
+			activeBuffer: null,
+		};
+	},
 	updateServer(state, id, updater) {
 		let server = state.servers.get(id);
 		if (!server) {
@@ -241,6 +254,7 @@ export const State = {
 			id,
 			status: ServerStatus.DISCONNECTED,
 			isupport: new Map(),
+			users: new irc.CaseMapMap(null, irc.CaseMapping.RFC1459),
 		});
 		return [id, { servers }];
 	},
@@ -271,8 +285,6 @@ export const State = {
 			serverInfo: null, // if server
 			topic: null, // if channel
 			members: new irc.CaseMapMap(null, client.cm), // if channel
-			who: null, // if nick
-			offline: false, // if nick
 			messages: [],
 			unread: Unread.NONE,
 			prevReadReceipt: null,
@@ -288,13 +300,24 @@ export const State = {
 		function updateBuffer(name, updater) {
 			return State.updateBuffer(state, { server: serverID, name }, updater);
 		}
+		function updateUser(name, updater) {
+			return updateServer((server) => {
+				let users = new irc.CaseMapMap(server.users);
+				let updated = updateState(users.get(name), updater);
+				if (!updated) {
+					return;
+				}
+				users.set(name, updated);
+				return { users };
+			});
+		}
 
 		// Don't update our internal state if it's a chat history message
 		if (irc.findBatchByType(msg, "chathistory")) {
 			return;
 		}
 
-		let target, channel, topic, targets;
+		let target, channel, topic, targets, who, update, buffers;
 		switch (msg.command) {
 		case irc.RPL_MYINFO:
 			// TODO: parse available modes
@@ -304,7 +327,7 @@ export const State = {
 			};
 			return updateBuffer(SERVER_BUFFER, { serverInfo });
 		case irc.RPL_ISUPPORT:
-			let buffers = new Map(state.buffers);
+			buffers = new Map(state.buffers);
 			state.buffers.forEach((buf) => {
 				if (buf.server != serverID) {
 					return;
@@ -314,7 +337,12 @@ export const State = {
 			});
 			return {
 				buffers,
-				...updateServer({ isupport: new Map(client.isupport) }),
+				...updateServer((server) => {
+					return {
+						isupport: new Map(client.isupport),
+						users: new irc.CaseMapMap(server.users, client.cm),
+					};
+				}),
 			};
 		case irc.RPL_NOTOPIC:
 			channel = msg.params[1];
@@ -326,39 +354,41 @@ export const State = {
 		case irc.RPL_TOPICWHOTIME:
 			// Ignore
 			break;
-		case irc.RPL_NAMREPLY:
-			channel = msg.params[2];
-			let membersList = msg.params[3].split(" ");
-
+		case irc.RPL_ENDOFNAMES:
+			channel = msg.params[1];
 			return updateBuffer(channel, (buf) => {
-				let members = new irc.CaseMapMap(buf.members);
-				membersList.forEach((s) => {
-					let member = irc.parseTargetPrefix(s);
-					members.set(member.name, member.prefix);
+				let members = new irc.CaseMapMap(null, buf.members.caseMap);
+				msg.list.forEach((namreply) => {
+					let membersList = namreply.params[3].split(" ");
+					membersList.forEach((s) => {
+						let member = irc.parseTargetPrefix(s);
+						members.set(member.name, member.prefix);
+					});
 				});
 				return { members };
 			});
-		case irc.RPL_ENDOFNAMES:
 			break;
 		case irc.RPL_WHOREPLY:
-			let last = msg.params[msg.params.length - 1];
-			let who = {
-				username: msg.params[2],
-				hostname: msg.params[3],
-				server: msg.params[4],
-				nick: msg.params[5],
-				away: msg.params[6] == 'G', // H for here, G for gone
-				realname: last.slice(last.indexOf(" ") + 1),
-			};
-			return updateBuffer(who.nick, { who, offline: false });
+		case irc.RPL_WHOSPCRPL:
+			who = client.parseWhoReply(msg);
+
+			if (who.flags !== undefined) {
+				who.away = who.flags.indexOf("G") >= 0; // H for here, G for gone
+				who.operator = who.flags.indexOf("*") >= 0;
+				delete who.flags;
+			}
+
+			who.offline = false;
+
+			return updateUser(who.nick, who);
 		case irc.RPL_ENDOFWHO:
 			target = msg.params[1];
 			if (!client.isChannel(target) && target.indexOf("*") < 0) {
 				// Not a channel nor a mask, likely a nick
-				return updateBuffer(target, (buf) => {
+				return updateUser(target, (user) => {
 					// TODO: mark user offline if we have old WHO info but this
 					// WHO reply is empty
-					if (buf.who) {
+					if (user) {
 						return;
 					}
 					return { offline: true };
@@ -373,12 +403,31 @@ export const State = {
 				state = { ...state, ...update };
 			}
 
-			let update = updateBuffer(channel, (buf) => {
+			update = updateBuffer(channel, (buf) => {
 				let members = new irc.CaseMapMap(buf.members);
 				members.set(msg.prefix.name, "");
 				return { members };
 			});
-			return { ...state, ...update };
+			state = { ...state, ...update };
+
+			who = { nick: msg.prefix.name, offline: false };
+			if (msg.prefix.user) {
+				who.username = msg.prefix.user;
+			}
+			if (msg.prefix.host) {
+				who.hostname = msg.prefix.host;
+			}
+			if (msg.params.length > 2) {
+				who.account = msg.params[1];
+				if (who.account === "*") {
+					who.account = null;
+				}
+				who.realname = msg.params[2];
+			}
+			update = updateUser(msg.prefix.name, who);
+			state = { ...state, ...update };
+
+			return state;
 		case "PART":
 			channel = msg.params[0];
 
@@ -396,18 +445,77 @@ export const State = {
 				members.delete(nick);
 				return { members };
 			});
-		case "SETNAME":
-			return updateBuffer(msg.prefix.name, (buf) => {
-				let who = { ...buf.who, realname: msg.params[0] };
-				return { who };
+		case "QUIT":
+			buffers = new Map(state.buffers);
+			state.buffers.forEach((buf) => {
+				if (buf.server != serverID) {
+					return;
+				}
+				if (!buf.members.has(msg.prefix.name)) {
+					return;
+				}
+				let members = new irc.CaseMapMap(buf.members);
+				members.delete(msg.prefix.name);
+				buffers.set(buf.id, { ...buf, members });
 			});
+			state = { ...state, buffers };
+
+			update = updateUser(msg.prefix.name, (user) => {
+				if (!user) {
+					return;
+				}
+				return { offline: true };
+			});
+			state = { ...state, ...update };
+
+			return state;
+		case "NICK":
+			let newNick = msg.params[0];
+
+			buffers = new Map(state.buffers);
+			state.buffers.forEach((buf) => {
+				if (buf.server != serverID) {
+					return;
+				}
+				if (!buf.members.has(msg.prefix.name)) {
+					return;
+				}
+				let members = new irc.CaseMapMap(buf.members);
+				members.set(newNick, members.get(msg.prefix.name));
+				members.delete(msg.prefix.name);
+				buffers.set(buf.id, { ...buf, members });
+			});
+			state = { ...state, buffers };
+
+			update = updateServer((server) => {
+				let users = new irc.CaseMapMap(server.users);
+				let user = users.get(msg.prefix.name);
+				if (!user) {
+					return;
+				}
+				users.set(newNick, user);
+				users.delete(msg.prefix.name);
+				return { users };
+			});
+			state = { ...state, ...update };
+
+			return state;
+		case "SETNAME":
+			return updateUser(msg.prefix.name, { realname: msg.params[0] });
+		case "CHGHOST":
+			return updateUser(msg.prefix.name, {
+				username: msg.params[0],
+				hostname: msg.params[1],
+			});
+		case "ACCOUNT":
+			let account = msg.params[0];
+			if (account === "*") {
+				account = null;
+			}
+			return updateUser(msg.prefix.name, { account });
 		case "AWAY":
 			let awayMessage = msg.params[0];
-
-			return updateBuffer(msg.prefix.name, (buf) => {
-				let who = { ...buf.who, away: !!awayMessage };
-				return { who };
-			});
+			return updateUser(msg.prefix.name, { away: !!awayMessage });
 		case "TOPIC":
 			channel = msg.params[0];
 			topic = msg.params[1];
@@ -443,9 +551,7 @@ export const State = {
 
 			for (let target of targets) {
 				let prefix = irc.parsePrefix(target);
-				let update = updateBuffer(prefix.name, (buf) => {
-					return { offline: false };
-				});
+				let update = updateUser(prefix.name, { offline: false });
 				state = { ...state, ...update };
 			}
 
@@ -455,9 +561,7 @@ export const State = {
 
 			for (let target of targets) {
 				let prefix = irc.parsePrefix(target);
-				let update = updateBuffer(prefix.name, (buf) => {
-					return { offline: true };
-				});
+				let update = updateUser(prefix.name, { offline: true });
 				state = { ...state, ...update };
 			}
 

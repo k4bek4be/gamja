@@ -116,6 +116,7 @@ function showNotification(title, options) {
 
 export default class App extends Component {
 	state = {
+		...State.create(),
 		connectParams: {
 			url: null,
 			pass: null,
@@ -123,13 +124,11 @@ export default class App extends Component {
 			realname: null,
 			nick: null,
 			saslPlain: null,
+			saslExternal: false,
 			autoconnect: false,
 			autojoin: [],
 		},
-		servers: new Map(),
-		buffers: new Map(),
 		bouncerNetworks: new Map(),
-		activeBuffer: null,
 		connectForm: true,
 		loading: true,
 		dialog: null,
@@ -154,6 +153,7 @@ export default class App extends Component {
 		this.handleConnectSubmit = this.handleConnectSubmit.bind(this);
 		this.handleJoinSubmit = this.handleJoinSubmit.bind(this);
 		this.handleBufferListClick = this.handleBufferListClick.bind(this);
+		this.handleBufferListClose = this.handleBufferListClose.bind(this);
 		this.toggleBufferList = this.toggleBufferList.bind(this);
 		this.toggleMemberList = this.toggleMemberList.bind(this);
 		this.handleComposerSubmit = this.handleComposerSubmit.bind(this);
@@ -186,19 +186,31 @@ export default class App extends Component {
 	 * - URL params
 	 * - Saved parameters in local storage
 	 * - Configuration data (fetched from the config.json file)
-	 * - Default server URL constructed from the current URL location
+	 * - Default server URL constructed from the current URL location (this is
+	 *   done in fillConnectParams)
 	 */
 	handleConfig(config) {
 		this.setState({ loading: false });
 
-		let connectParams = {};
+		let connectParams = { ...this.state.connectParams };
 
 		if (config.server) {
-			connectParams.url = config.server.url;
+			if (typeof config.server.url === "string") {
+				connectParams.url = config.server.url;
+			}
 			if (Array.isArray(config.server.autojoin)) {
 				connectParams.autojoin = config.server.autojoin;
-			} else if (config.server.autojoin) {
+			} else if (typeof config.server.autojoin === "string") {
 				connectParams.autojoin = [config.server.autojoin];
+			}
+			if (typeof config.server.nick === "string") {
+				connectParams.nick = config.server.nick;
+			}
+			if (typeof config.server.autoconnect === "boolean") {
+				connectParams.autoconnect = config.server.autoconnect;
+			}
+			if (config.server.auth === "external") {
+				connectParams.saslExternal = true;
 			}
 		}
 
@@ -208,11 +220,16 @@ export default class App extends Component {
 				...connectParams,
 				...autoconnect,
 				autoconnect: true,
+				autojoin: [], // handled by store.Buffer
 			};
 		}
 
 		let queryParams = parseQueryString();
-		if (typeof queryParams.server === "string") {
+		// Don't allow to silently override the server URL if there's one in
+		// config.json, because this has security implications. But still allow
+		// setting server to an empty string to reveal the server field in the
+		// connect form.
+		if (typeof queryParams.server === "string" && (!connectParams.url || !queryParams.server)) {
 			connectParams.url = queryParams.server;
 
 			// When using a custom server, some configuration options don't
@@ -222,7 +239,7 @@ export default class App extends Component {
 		if (typeof queryParams.nick === "string") {
 			connectParams.nick = queryParams.nick;
 		}
-		if (typeof queryParams.channels == "string") {
+		if (typeof queryParams.channels === "string") {
 			connectParams.autojoin = queryParams.channels.split(",");
 		}
 
@@ -232,14 +249,7 @@ export default class App extends Component {
 
 		this.config = config;
 
-		this.setState((state) => {
-			return {
-				connectParams: {
-					...state.connectParams,
-					...connectParams,
-				},
-			};
-		});
+		this.setState({ connectParams: connectParams });
 
 		if (connectParams.autoconnect) {
 			this.setState({ connectForm: false });
@@ -283,12 +293,16 @@ export default class App extends Component {
 	createBuffer(serverID, name) {
 		let client = this.clients.get(serverID);
 		let id = null;
+		let isNew = false;
 		this.setState((state) => {
 			let updated;
 			[id, updated] = State.createBuffer(state, name, serverID, client);
+			isNew = !!updated;
 			return updated;
 		});
-		this.syncBufferUnread(serverID, name);
+		if (isNew) {
+			this.syncBufferUnread(serverID, name);
+		}
 		return id;
 	}
 
@@ -328,6 +342,11 @@ export default class App extends Component {
 				server: client.params,
 				unread: Unread.NONE,
 			});
+
+			let server = this.state.servers.get(buf.server);
+			if (buf.type === BufferType.NICK && !server.users.has(buf.name)) {
+				this.whoUserBuffer(buf.name, buf.server);
+			}
 		});
 	}
 
@@ -565,50 +584,18 @@ export default class App extends Component {
 		return null;
 	}
 
-	handleMessage(serverID, msg) {
+	routeMessage(serverID, msg) {
 		let client = this.clients.get(serverID);
 		let chatHistoryBatch = irc.findBatchByType(msg, "chathistory");
 
-		this.setState((state) => State.handleMessage(state, msg, serverID, client));
-
 		let target, channel, affectedBuffers;
 		switch (msg.command) {
-		case irc.RPL_WELCOME:
-			if (this.state.connectParams.autojoin.length > 0) {
-				client.send({
-					command: "JOIN",
-					params: [this.state.connectParams.autojoin.join(",")],
-				});
-			}
-
-			// Restore opened user query buffers
-			for (let buf of this.bufferStore.list(client.params)) {
-				if (buf.name === "*" || client.isChannel(buf.name)) {
-					continue;
-				}
-				this.createBuffer(serverID, buf.name);
-				client.who(buf.name);
-				client.monitor(buf.name);
-			}
-
-			let lastReceipt = this.latestReceipt(ReceiptType.DELIVERED);
-			if (lastReceipt && lastReceipt.time && client.enabledCaps["draft/chathistory"] && (!client.enabledCaps["soju.im/bouncer-networks"] || client.params.bouncerNetwork)) {
-				let now = irc.formatDate(new Date());
-				client.fetchHistoryTargets(now, lastReceipt.time).then((targets) => {
-					targets.forEach((target) => {
-						let from = lastReceipt;
-						let to = { time: msg.tags.time || irc.formatDate(new Date()) };
-						this.fetchBacklog(client, target.name, from, to);
-					});
-				});
-			}
-			break;
 		case "MODE":
 			target = msg.params[0];
 			if (client.isChannel(target)) {
-				this.addMessage(serverID, target, msg);
+				return [target];
 			}
-			break;
+			return [];
 		case "NOTICE":
 		case "PRIVMSG":
 			target = msg.params[0];
@@ -631,62 +618,35 @@ export default class App extends Component {
 					target = parts.name;
 				}
 			}
-
-			this.addMessage(serverID, target, msg);
-			break;
+			return [target];
 		case "JOIN":
 			channel = msg.params[0];
-
-			if (client.isMyNick(msg.prefix.name)) {
-				this.syncBufferUnread(serverID, channel);
-			} else {
-				this.addMessage(serverID, channel, msg);
+			if (!client.isMyNick(msg.prefix.name)) {
+				return [channel];
 			}
-			if (channel == this.switchToChannel) {
-				this.switchBuffer({ server: serverID, name: channel });
-				this.switchToChannel = null;
-			}
-			break;
+			return [];
 		case "PART":
 			channel = msg.params[0];
-
-			this.addMessage(serverID, channel, msg);
-
-			if (!chatHistoryBatch && client.isMyNick(msg.prefix.name)) {
-				this.receipts.delete(channel);
-				this.saveReceipts();
-			}
-			break;
+			return [channel];
 		case "KICK":
 			channel = msg.params[0];
-			this.addMessage(serverID, channel, msg);
-			break;
+			return [channel];
 		case "QUIT":
 			affectedBuffers = [];
 			if (chatHistoryBatch) {
 				affectedBuffers.push(chatHistoryBatch.params[0]);
 			} else {
-				this.setState((state) => {
-					let buffers = new Map(state.buffers);
-					state.buffers.forEach((buf) => {
-						if (buf.server != serverID) {
-							return;
-						}
-						if (!buf.members.has(msg.prefix.name) && client.cm(buf.name) !== client.cm(msg.prefix.name)) {
-							return;
-						}
-						let members = new irc.CaseMapMap(buf.members);
-						members.delete(msg.prefix.name);
-						let offline = client.cm(buf.name) === client.cm(msg.prefix.name);
-						buffers.set(buf.id, { ...buf, members, offline });
-						affectedBuffers.push(buf.name);
-					});
-					return { buffers };
+				this.state.buffers.forEach((buf) => {
+					if (buf.server != serverID) {
+						return;
+					}
+					if (!buf.members.has(msg.prefix.name) && client.cm(buf.name) !== client.cm(msg.prefix.name)) {
+						return;
+					}
+					affectedBuffers.push(buf.name);
 				});
 			}
-
-			affectedBuffers.forEach((name) => this.addMessage(serverID, name, msg));
-			break;
+			return affectedBuffers;
 		case "NICK":
 			let newNick = msg.params[0];
 
@@ -694,31 +654,20 @@ export default class App extends Component {
 			if (chatHistoryBatch) {
 				affectedBuffers.push(chatHistoryBatch.params[0]);
 			} else {
-				this.setState((state) => {
-					let buffers = new Map(state.buffers);
-					state.buffers.forEach((buf) => {
-						if (buf.server != serverID) {
-							return;
-						}
-						if (!buf.members.has(msg.prefix.name)) {
-							return;
-						}
-						let members = new irc.CaseMapMap(buf.members);
-						members.set(newNick, members.get(msg.prefix.name));
-						members.delete(msg.prefix.name);
-						buffers.set(buf.id, { ...buf, members });
-						affectedBuffers.push(buf.name);
-					});
-					return { buffers };
+				this.state.buffers.forEach((buf) => {
+					if (buf.server != serverID) {
+						return;
+					}
+					if (!buf.members.has(msg.prefix.name)) {
+						return;
+					}
+					affectedBuffers.push(buf.name);
 				});
 			}
-
-			affectedBuffers.forEach((name) => this.addMessage(serverID, name, msg));
-			break;
+			return affectedBuffers;
 		case "TOPIC":
 			channel = msg.params[0];
-			this.addMessage(serverID, channel, msg);
-			break;
+			return [channel];
 		case "INVITE":
 			channel = msg.params[1];
 
@@ -728,7 +677,133 @@ export default class App extends Component {
 				bufName = SERVER_BUFFER;
 			}
 
-			this.addMessage(serverID, bufName, msg);
+			return [bufName];
+		case irc.RPL_CHANNELMODEIS:
+		case irc.RPL_CREATIONTIME:
+		case irc.RPL_INVITELIST:
+		case irc.RPL_ENDOFINVITELIST:
+		case irc.RPL_EXCEPTLIST:
+		case irc.RPL_ENDOFEXCEPTLIST:
+		case irc.RPL_BANLIST:
+		case irc.RPL_ENDOFBANLIST:
+		case irc.RPL_QUIETLIST:
+		case irc.RPL_ENDOFQUIETLIST:
+			channel = msg.params[1];
+			return [channel];
+		case irc.RPL_INVITING:
+			channel = msg.params[2];
+			return [channel];
+		case irc.RPL_YOURHOST:
+		case irc.RPL_MYINFO:
+		case irc.RPL_ISUPPORT:
+		case irc.RPL_ENDOFMOTD:
+		case irc.ERR_NOMOTD:
+		case irc.RPL_NOTOPIC:
+		case irc.RPL_TOPIC:
+		case irc.RPL_TOPICWHOTIME:
+		case irc.RPL_NAMREPLY:
+		case irc.RPL_ENDOFNAMES:
+		case irc.RPL_MONONLINE:
+		case irc.RPL_MONOFFLINE:
+		case irc.RPL_SASLSUCCESS:
+		case "AWAY":
+		case "SETNAME":
+		case "CHGHOST":
+		case "ACCOUNT":
+		case "CAP":
+		case "AUTHENTICATE":
+		case "PING":
+		case "PONG":
+		case "BATCH":
+		case "TAGMSG":
+		case "CHATHISTORY":
+		case "ACK":
+		case "BOUNCER":
+			// Ignore these
+			return [];
+		default:
+			return [SERVER_BUFFER];
+		}
+	}
+
+	handleMessage(serverID, msg) {
+		let client = this.clients.get(serverID);
+
+		var destBuffers = this.routeMessage(serverID, msg);
+
+		if (irc.findBatchByType(msg, "chathistory")) {
+			destBuffers.forEach((bufName) => {
+				this.addMessage(serverID, bufName, msg);
+			});
+			return;
+		}
+
+		this.setState((state) => State.handleMessage(state, msg, serverID, client));
+
+		let target, channel;
+		switch (msg.command) {
+		case irc.RPL_WELCOME:
+			let lastReceipt = this.latestReceipt(ReceiptType.DELIVERED);
+			if (lastReceipt && lastReceipt.time && client.enabledCaps["draft/chathistory"] && (!client.enabledCaps["soju.im/bouncer-networks"] || client.params.bouncerNetwork)) {
+				let now = irc.formatDate(new Date());
+				client.fetchHistoryTargets(now, lastReceipt.time).then((targets) => {
+					targets.forEach((target) => {
+						let from = lastReceipt;
+						let to = { time: msg.tags.time || now };
+						this.fetchBacklog(client, target.name, from, to);
+					});
+				});
+			}
+			break;
+		case irc.RPL_ENDOFMOTD:
+		case irc.ERR_NOMOTD:
+			// These messages are used to indicate the end of the ISUPPORT list
+
+			// Restore opened channel and user buffers
+			let join = [];
+			for (let buf of this.bufferStore.list(client.params)) {
+				if (buf.name === "*") {
+					continue;
+				}
+
+				if (client.isChannel(buf.name)) {
+					if (client.enabledCaps["soju.im/bouncer-networks"]) {
+						continue;
+					}
+					join.push(buf.name);
+				} else {
+					this.createBuffer(serverID, buf.name);
+					this.whoUserBuffer(buf.name, serverID);
+				}
+			}
+
+			// Auto-join channels given at connect-time
+			join = join.concat(this.state.connectParams.autojoin);
+
+			if (join.length > 0) {
+				client.send({
+					command: "JOIN",
+					params: [join.join(",")],
+				});
+			}
+		case "JOIN":
+			channel = msg.params[0];
+
+			if (client.isMyNick(msg.prefix.name)) {
+				this.syncBufferUnread(serverID, channel);
+			}
+			if (channel == this.switchToChannel) {
+				this.switchBuffer({ server: serverID, name: channel });
+				this.switchToChannel = null;
+			}
+			break;
+		case "PART":
+			channel = msg.params[0];
+
+			if (client.isMyNick(msg.prefix.name)) {
+				this.receipts.delete(channel);
+				this.saveReceipts();
+			}
 			break;
 		case "BOUNCER":
 			if (msg.params[0] !== "NETWORK") {
@@ -736,7 +811,7 @@ export default class App extends Component {
 			}
 
 			if (client.isupport.has("BOUNCER_NETID")) {
-				// This cn happen if the user has specified a network to bind
+				// This can happen if the user has specified a network to bind
 				// to via other means, e.g. "<username>/<network>".
 				break;
 			}
@@ -773,51 +848,16 @@ export default class App extends Component {
 				}
 			});
 			break;
-		case irc.RPL_CHANNELMODEIS:
-		case irc.RPL_CREATIONTIME:
-		case irc.RPL_INVITELIST:
-		case irc.RPL_ENDOFINVITELIST:
-		case irc.RPL_EXCEPTLIST:
-		case irc.RPL_ENDOFEXCEPTLIST:
-		case irc.RPL_BANLIST:
-		case irc.RPL_ENDOFBANLIST:
-		case irc.RPL_QUIETLIST:
-		case irc.RPL_ENDOFQUIETLIST:
-			channel = msg.params[1];
-			this.addMessage(serverID, channel, msg);
-			break;
-		case irc.RPL_INVITING:
-			channel = msg.params[2];
-			this.addMessage(serverID, channel, msg);
-			break;
-		case irc.RPL_MYINFO:
-		case irc.RPL_ISUPPORT:
-		case irc.RPL_NOTOPIC:
-		case irc.RPL_TOPIC:
-		case irc.RPL_TOPICWHOTIME:
-		case irc.RPL_NAMREPLY:
-		case irc.RPL_ENDOFNAMES:
-		case irc.RPL_MONONLINE:
-		case irc.RPL_MONOFFLINE:
-		case "AWAY":
-		case "SETNAME":
-		case "CAP":
-		case "AUTHENTICATE":
-		case "PING":
-		case "PONG":
-		case "BATCH":
-		case "TAGMSG":
-		case "CHATHISTORY":
-		case "ACK":
-			// Ignore these
-			break;
 		default:
 			if (irc.isError(msg.command) && msg.command != irc.ERR_NOMOTD) {
 				let description = msg.params[msg.params.length - 1];
 				this.setState({ error: description });
 			}
-			this.addMessage(serverID, SERVER_BUFFER, msg);
 		}
+
+		destBuffers.forEach((bufName) => {
+			this.addMessage(serverID, bufName, msg);
+		});
 	}
 
 	handleConnectSubmit(connectParams) {
@@ -832,13 +872,52 @@ export default class App extends Component {
 		this.connect(connectParams);
 	}
 
-	handleChannelClick(channel) {
-		let serverID = State.getActiveServerID(this.state);
-		let buf = State.getBuffer(this.state, { server: serverID, name: channel });
+	handleChannelClick(event) {
+		let url = irc.parseURL(event.target.href);
+		if (!url) {
+			return;
+		}
+
+		let serverID;
+		if (!url.host) {
+			serverID = State.getActiveServerID(this.state);
+		} else {
+			let bouncerNetID;
+			for (let [id, bouncerNetwork] of this.state.bouncerNetworks) {
+				if (bouncerNetwork.host === url.host) {
+					bouncerNetID = id;
+					break;
+				}
+			}
+			if (!bouncerNetID) {
+				// Open dialog to create network if bouncer
+				let client = this.clients.values().next().value;
+				if (client && client.enabledCaps["soju.im/bouncer-networks"]) {
+					event.preventDefault();
+					let params = { host: url.host };
+					this.openDialog("network", { params });
+				}
+				return;
+			}
+
+			for (let [id, server] of this.state.servers) {
+				if (server.isupport.get("BOUNCER_NETID") === bouncerNetID) {
+					serverID = id;
+					break;
+				}
+			}
+		}
+		if (!serverID) {
+			return;
+		}
+
+		event.preventDefault();
+
+		let buf = State.getBuffer(this.state, { server: serverID, name: url.entity || SERVER_BUFFER });
 		if (buf) {
 			this.switchBuffer(buf.id);
 		} else {
-			this.open(channel);
+			this.open(url.entity, serverID);
 		}
 	}
 
@@ -854,6 +933,15 @@ export default class App extends Component {
 		});
 	}
 
+	whoUserBuffer(target, serverID) {
+		let client = this.clients.get(serverID);
+
+		client.who(target, {
+			fields: ["flags", "hostname", "nick", "realname", "username", "account"],
+		});
+		client.monitor(target);
+	}
+
 	open(target, serverID) {
 		if (!serverID) {
 			serverID = State.getActiveServerID(this.state);
@@ -866,8 +954,7 @@ export default class App extends Component {
 			this.switchToChannel = target;
 			client.send({ command: "JOIN", params: [target] });
 		} else {
-			client.who(target);
-			client.monitor(target);
+			this.whoUserBuffer(target, serverID);
 			this.createBuffer(serverID, target);
 			this.switchBuffer({ server: serverID, name: target });
 		}
@@ -1012,6 +1099,11 @@ export default class App extends Component {
 
 	handleBufferListClick(id) {
 		this.switchBuffer(id);
+		this.closeBufferList();
+	}
+
+	handleBufferListClose(id) {
+		this.close(id);
 		this.closeBufferList();
 	}
 
@@ -1236,11 +1328,17 @@ export default class App extends Component {
 
 		let bufferHeader = null;
 		if (activeBuffer) {
+			let activeUser = null;
+			if (activeBuffer.type == BufferType.NICK) {
+				activeUser = activeServer.users.get(activeBuffer.name);
+			}
+
 			bufferHeader = html`
 				<section id="buffer-header">
 					<${BufferHeader}
 						buffer=${activeBuffer}
 						server=${activeServer}
+						user=${activeUser}
 						isBouncer=${isBouncer}
 						bouncerNetwork=${activeBouncerNetwork}
 						onChannelClick=${this.handleChannelClick}
@@ -1273,6 +1371,7 @@ export default class App extends Component {
 						</section>
 						<${MemberList}
 							members=${activeBuffer.members}
+							users=${activeServer.users}
 							onNickClick=${this.handleNickClick}
 						/>
 					</section>
@@ -1283,13 +1382,15 @@ export default class App extends Component {
 		let dialog = null;
 		switch (this.state.dialog) {
 		case "network":
-			let title = this.state.dialogData ? "Edit network" : "Add network";
+			let isNew = !!(!this.state.dialogData || !this.state.dialogData.id);
+			let title = isNew ? "Add network" : "Edit network";
 			dialog = html`
 				<${Dialog} title=${title} onDismiss=${this.dismissDialog}>
 					<${NetworkForm}
 						onSubmit=${this.handleNetworkSubmit}
 						onRemove=${this.handleNetworkRemove}
 						params=${this.state.dialogData ? this.state.dialogData.params : null}
+						isNew=${isNew}
 					/>
 				</>
 			`;
@@ -1341,6 +1442,7 @@ export default class App extends Component {
 					isBouncer=${isBouncer}
 					activeBuffer=${this.state.activeBuffer}
 					onBufferClick=${this.handleBufferListClick}
+					onBufferClose=${this.handleBufferListClose}
 				/>
 				<button
 					class="expander"

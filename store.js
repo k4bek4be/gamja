@@ -41,7 +41,7 @@ export class Buffer {
 	m = null;
 
 	constructor() {
-		var obj = this.raw.load();
+		let obj = this.raw.load();
 		this.m = new Map(Object.entries(obj || {}));
 	}
 
@@ -107,7 +107,7 @@ export class Buffer {
 
 	clear(server) {
 		if (server) {
-			for (const buf of this.load(server)) {
+			for (const buf of this.m.values()) {
 				this.m.delete(this.key(buf));
 			}
 		} else {
