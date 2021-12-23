@@ -21,24 +21,12 @@ function NickStatus(props) {
 }
 
 export default function BufferHeader(props) {
-	function handleCloseClick(event) {
-		event.preventDefault();
-		props.onClose();
-	}
-	function handleJoinClick(event) {
-		event.preventDefault();
-		props.onJoin();
-	}
-	function handleAddNetworkClick(event) {
-		event.preventDefault();
-		props.onAddNetwork();
-	}
-	function handleManageNetworkClick(event) {
-		event.preventDefault();
-		props.onManageNetwork();
+	let fullyConnected = props.server.status === ServerStatus.REGISTERED;
+	if (props.bouncerNetwork) {
+		fullyConnected = fullyConnected && props.bouncerNetwork.state === "connected";
 	}
 
-	let description = null, actions = null;
+	let description = null, actions = [];
 	switch (props.buffer.type) {
 	case BufferType.SERVER:
 		switch (props.server.status) {
@@ -74,56 +62,95 @@ export default function BufferHeader(props) {
 			break;
 		}
 
-		if (props.isBouncer) {
-			if (props.server.isupport.get("BOUNCER_NETID")) {
-				actions = html`
-					<button
-						key="join"
-						onClick=${handleJoinClick}
-					>Join channel</button>
-					<button
-						key="manage"
-						onClick=${handleManageNetworkClick}
-					>Manage network</button>
-				`;
+		let joinButton = html`
+			<button
+				key="join"
+				onClick=${props.onJoin}
+			>Join channel</button>
+		`;
+		let reconnectButton = html`
+			<button
+				key="reconect"
+				onClick=${props.onReconnect}
+			>Reconnect</button>
+		`;
+
+		if (props.server.isBouncer) {
+			if (props.server.bouncerNetID) {
+				if (fullyConnected) {
+					actions.push(joinButton);
+				}
+				if (props.server.status === ServerStatus.REGISTERED) {
+					actions.push(html`
+						<button
+							key="manage"
+							onClick=${props.onManageNetwork}
+						>Manage network</button>
+					`);
+				}
 			} else {
-				actions = html`
-					<button
-						key="add"
-						onClick=${handleAddNetworkClick}
-					>Add network</button>
+				if (fullyConnected) {
+					actions.push(html`
+						<button
+							key="add"
+							onClick=${props.onAddNetwork}
+						>Add network</button>
+					`);
+				} else if (props.server.status === ServerStatus.DISCONNECTED) {
+					actions.push(reconnectButton);
+				}
+				actions.push(html`
 					<button
 						key="disconnect"
 						class="danger"
-						onClick=${handleCloseClick}
+						onClick=${props.onClose}
 					>Disconnect</button>
-				`;
+				`);
 			}
 		} else {
-			actions = html`
-				<button
-					key="join"
-					onClick=${handleJoinClick}
-				>Join channel</button>
+			if (fullyConnected) {
+				actions.push(joinButton);
+			} else if (props.server.status === ServerStatus.DISCONNECTED) {
+				actions.push(reconnectButton);
+			}
+			actions.push(html`
 				<button
 					key="disconnect"
 					class="danger"
-					onClick=${handleCloseClick}
+					onClick=${props.onClose}
 				>Disconnect</button>
-			`;
+			`);
 		}
 		break;
 	case BufferType.CHANNEL:
 		if (props.buffer.topic) {
 			description = linkify(stripANSI(props.buffer.topic), props.onChannelClick);
 		}
-		actions = html`
-			<button
-				key="part"
-				class="danger"
-				onClick=${handleCloseClick}
-			>Leave</button>
-		`;
+		if (props.buffer.joined) {
+			actions.push(html`
+				<button
+					key="part"
+					class="danger"
+					onClick=${props.onClose}
+				>Leave</button>
+			`);
+		} else {
+			if (fullyConnected) {
+				actions.push(html`
+					<button
+						key="join"
+						onClick=${props.onJoin}
+					>Join</button>
+				`);
+			}
+			actions.push(html`
+				<button
+					key="part"
+					class="danger"
+					onClick=${props.onClose}
+				>Close</button>
+			`);
+		}
 		break;
 	case BufferType.NICK:
 		if (props.user) {
@@ -144,20 +171,33 @@ export default function BufferHeader(props) {
 				details.push(`${props.user.username}@${props.user.hostname}`);
 			}
 			if (props.user.account) {
+				let desc = `This user is verified and has logged in to the server with the account ${props.user.account}.`;
+				let item;
 				if (props.user.account === props.buffer.name) {
-					details.push("authenticated");
+					item = "authenticated";
 				} else {
-					details.push(`authenticated as ${props.user.account}`);
+					item = `authenticated as ${props.user.account}`;
 				}
-			} else if (props.server.isupport.has("MONITOR") && props.server.isupport.has("WHOX")) {
+				details.push(html`<abbr title=${desc}>${item}</abbr>`);
+			} else if (props.server.reliableUserAccounts) {
 				// If the server supports MONITOR and WHOX, we can faithfully
 				// keep user.account up-to-date for user queries
-				details.push("unauthenticated");
+				let desc = "This user has not been verified and is not logged in.";
+				details.push(html`<abbr title=${desc}>unauthenticated</abbr>`);
 			}
 			if (props.user.operator) {
-				details.push("server operator");
+				let desc = "This user is a server operator, they have administrator privileges.";
+				details.push(html`<abbr title=${desc}>server operator</abbr>`);
 			}
-			details = details.length > 0 ? `(${details.join(", ")})` : null;
+			details = details.map((item, i) => {
+				if (i === 0) {
+					return item;
+				}
+				return [", ", item];
+			});
+			if (details.length > 0) {
+				details = ["(", details, ")"];
+			}
 
 			description = html`<${NickStatus} status=${status}/> ${realname} ${details}`;
 		}
@@ -166,7 +206,7 @@ export default function BufferHeader(props) {
 			<button
 				key="close"
 				class="danger"
-				onClick=${handleCloseClick}
+				onClick=${props.onClose}
 			>Close</button>
 		`;
 		break;
@@ -174,7 +214,7 @@ export default function BufferHeader(props) {
 
 	let name = props.buffer.name;
 	if (props.buffer.type == BufferType.SERVER) {
-		name = getServerName(props.server, props.bouncerNetwork, props.isBouncer);
+		name = getServerName(props.server, props.bouncerNetwork);
 	}
 
 	return html`

@@ -58,6 +58,13 @@ body {
 	font-family: monospace;
 }
 
+noscript {
+	display: block;
+	margin: 0 auto;
+	max-width: 600px;
+	grid-column-start: 2;
+}
+
 button {
 	background: var(--button-background);
 	transition: background 0.25s linear;
@@ -278,6 +285,9 @@ button.danger:hover {
 	width: 100%;
 	padding: 2px 10px;
 	box-sizing: border-box;
+}
+#member-list li a.away {
+	color: var(--gray);
 }
 
 .membership.owner {

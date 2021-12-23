@@ -1,8 +1,9 @@
 import { html, Component } from "../lib/index.js";
 
-export default class JoinForm extends Component {
+export default class RegisterForm extends Component {
 	state = {
-		channel: "#",
+		email: "",
+		password: "",
 	};
 
 	constructor(props) {
@@ -10,10 +11,6 @@ export default class JoinForm extends Component {
 
 		this.handleChange = this.handleChange.bind(this);
 		this.handleSubmit = this.handleSubmit.bind(this);
-
-		if (props.channel) {
-			this.state.channel = props.channel;
-		}
 	}
 
 	handleChange(event) {
@@ -25,24 +22,32 @@ export default class JoinForm extends Component {
 	handleSubmit(event) {
 		event.preventDefault();
 
-		let params = {
-			channel: this.state.channel,
-		};
-
-		this.props.onSubmit(params);
+		this.props.onSubmit(this.state.email, this.state.password);
 	}
 
 	render() {
 		return html`
 			<form onChange=${this.handleChange} onSubmit=${this.handleSubmit}>
 				<label>
-					Channel:<br/>
-					<input type="text" name="channel" value=${this.state.channel} autofocus required/>
+					E-mail:<br/>
+					<input
+						type="email"
+						name="email"
+						value=${this.state.email}
+						required=${this.props.emailRequired}
+						placeholder=${this.props.emailRequired ? null : "(optional)"}
+						autofocus
+					/>
 				</label>
-				<br/>
+				<br/><br/>
 
-				<br/>
-				<button>Join</button>
+				<label>
+					Password:<br/>
+					<input type="password" name="password" value=${this.state.password} required/>
+				</label>
+				<br/><br/>
+
+				<button>Register</button>
 			</form>
 		`;
 	}

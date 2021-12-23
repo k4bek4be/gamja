@@ -63,8 +63,8 @@ export function getMessageURL(buf, msg) {
 	}
 }
 
-export function getServerName(server, bouncerNetwork, isBouncer) {
-	let netName = server.isupport.get("NETWORK");
+export function getServerName(server, bouncerNetwork) {
+	let netName = server.name;
 
 	if (bouncerNetwork && bouncerNetwork.name && bouncerNetwork.name !== bouncerNetwork.host) {
 		// User has picked a custom name for the network, use that
@@ -78,7 +78,7 @@ export function getServerName(server, bouncerNetwork, isBouncer) {
 
 	if (bouncerNetwork) {
 		return bouncerNetwork.name || bouncerNetwork.host || "server";
-	} else if (isBouncer) {
+	} else if (server.isBouncer) {
 		return "bouncer";
 	} else {
 		return "server";
@@ -118,7 +118,7 @@ function compareBuffers(a, b) {
 }
 
 function updateMembership(membership, letter, add, client) {
-	let prefix = client.isupport.get("PREFIX") || "";
+	let prefix = client.isupport.prefix();
 
 	let prefixPrivs = new Map(irc.parseMembershipModes(prefix).map((membership, i) => {
 		return [membership.prefix, i];
@@ -143,7 +143,7 @@ function updateMembership(membership, letter, add, client) {
 function insertMessage(list, msg) {
 	if (list.length == 0) {
 		return [msg];
-	} else if (list[list.length - 1].tags.time <= msg.tags.time) {
+	} else if (!irc.findBatchByType(msg, "chathistory") || list[list.length - 1].tags.time <= msg.tags.time) {
 		return list.concat(msg);
 	}
 
@@ -231,7 +231,7 @@ export const State = {
 			let cm = irc.CaseMapping.RFC1459;
 			let server = state.servers.get(serverID);
 			if (server) {
-				cm = irc.CaseMapping.byName(server.isupport.get("CASEMAPPING")) || cm;
+				cm = server.cm;
 			}
 
 			let nameCM = cm(name);
@@ -252,9 +252,17 @@ export const State = {
 		let servers = new Map(state.servers);
 		servers.set(id, {
 			id,
+			name: null, // from ISUPPORT NETWORK
 			status: ServerStatus.DISCONNECTED,
-			isupport: new Map(),
+			cm: irc.CaseMapping.RFC1459,
 			users: new irc.CaseMapMap(null, irc.CaseMapping.RFC1459),
+			account: null,
+			supportsSASLPlain: false,
+			supportsAccountRegistration: false,
+			reliableUserAccounts: false,
+			statusMsg: null, // from ISUPPORT STATUSMSG
+			isBouncer: false,
+			bouncerNetID: null,
 		});
 		return [id, { servers }];
 	},
@@ -283,6 +291,7 @@ export const State = {
 			type,
 			server: serverID,
 			serverInfo: null, // if server
+			joined: false, // if channel
 			topic: null, // if channel
 			members: new irc.CaseMapMap(null, client.cm), // if channel
 			messages: [],
@@ -339,11 +348,31 @@ export const State = {
 				buffers,
 				...updateServer((server) => {
 					return {
-						isupport: new Map(client.isupport),
+						name: client.isupport.network(),
+						cm: client.cm,
 						users: new irc.CaseMapMap(server.users, client.cm),
+						reliableUserAccounts: client.isupport.monitor() > 0 && client.isupport.whox(),
+						statusMsg: client.isupport.statusMsg(),
+						bouncerNetID: client.isupport.bouncerNetID(),
 					};
 				}),
 			};
+		case "CAP":
+			return updateServer({
+				supportsSASLPlain: client.supportsSASL("PLAIN"),
+				supportsAccountRegistration: client.caps.enabled.has("draft/account-registration"),
+				isBouncer: client.caps.enabled.has("soju.im/bouncer-networks"),
+			});
+		case irc.RPL_LOGGEDIN:
+			return updateServer({ account: msg.params[2] });
+		case irc.RPL_LOGGEDOUT:
+			return updateServer({ account: null });
+		case "REGISTER":
+		case "VERIFY":
+			if (msg.params[0] === "SUCCESS") {
+				return updateServer({ account: msg.params[1] });
+			}
+			break;
 		case irc.RPL_NOTOPIC:
 			channel = msg.params[1];
 			return updateBuffer(channel, { topic: null });
@@ -383,14 +412,9 @@ export const State = {
 			return updateUser(who.nick, who);
 		case irc.RPL_ENDOFWHO:
 			target = msg.params[1];
-			if (!client.isChannel(target) && target.indexOf("*") < 0) {
+			if (msg.list.length == 0 && !client.isChannel(target) && target.indexOf("*") < 0) {
 				// Not a channel nor a mask, likely a nick
 				return updateUser(target, (user) => {
-					// TODO: mark user offline if we have old WHO info but this
-					// WHO reply is empty
-					if (user) {
-						return;
-					}
 					return { offline: true };
 				});
 			}
@@ -406,7 +430,10 @@ export const State = {
 			update = updateBuffer(channel, (buf) => {
 				let members = new irc.CaseMapMap(buf.members);
 				members.set(msg.prefix.name, "");
-				return { members };
+
+				let joined = buf.joined || client.isMyNick(msg.prefix.name);
+
+				return { members, joined };
 			});
 			state = { ...state, ...update };
 
@@ -434,7 +461,10 @@ export const State = {
 			return updateBuffer(channel, (buf) => {
 				let members = new irc.CaseMapMap(buf.members);
 				members.delete(msg.prefix.name);
-				return { members };
+
+				let joined = buf.joined && !client.isMyNick(msg.prefix.name);
+
+				return { members, joined };
 			});
 		case "KICK":
 			channel = msg.params[0];
@@ -443,7 +473,10 @@ export const State = {
 			return updateBuffer(channel, (buf) => {
 				let members = new irc.CaseMapMap(buf.members);
 				members.delete(nick);
-				return { members };
+
+				let joined = buf.joined && !client.isMyNick(nick);
+
+				return { members, joined };
 			});
 		case "QUIT":
 			buffers = new Map(state.buffers);
@@ -527,7 +560,7 @@ export const State = {
 				return; // TODO: handle user mode changes too
 			}
 
-			let prefix = client.isupport.get("PREFIX") || "";
+			let prefix = client.isupport.prefix();
 			let prefixByMode = new Map(irc.parseMembershipModes(prefix).map((membership) => {
 				return [membership.mode, membership.prefix];
 			}));

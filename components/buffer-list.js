@@ -16,7 +16,7 @@ function BufferItem(props) {
 
 	let name = props.buffer.name;
 	if (props.buffer.type == BufferType.SERVER) {
-		name = getServerName(props.server, props.bouncerNetwork, props.isBouncer);
+		name = getServerName(props.server, props.bouncerNetwork);
 	}
 
 	let classes = ["type-" + props.buffer.type];
@@ -44,7 +44,7 @@ export default function BufferList(props) {
 		let server = props.servers.get(buf.server);
 
 		let bouncerNetwork = null;
-		let bouncerNetID = server.isupport.get("BOUNCER_NETID");
+		let bouncerNetID = server.bouncerNetID;
 		if (bouncerNetID) {
 			bouncerNetwork = props.bouncerNetworks.get(bouncerNetID);
 		}
@@ -54,7 +54,6 @@ export default function BufferList(props) {
 				key=${buf.id}
 				buffer=${buf}
 				server=${server}
-				isBouncer=${props.isBouncer}
 				bouncerNetwork=${bouncerNetwork}
 				onClick=${() => props.onBufferClick(buf)}
 				onClose=${() => props.onBufferClose(buf)}

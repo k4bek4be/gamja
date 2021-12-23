@@ -2,7 +2,8 @@ import { html, Component } from "../lib/index.js";
 import linkify from "../lib/linkify.js";
 import * as irc from "../lib/irc.js";
 import { strip as stripANSI } from "../lib/ansi.js";
-import { BufferType, getNickURL, getChannelURL, getMessageURL } from "../state.js";
+import { BufferType, ServerStatus, getNickURL, getChannelURL, getMessageURL } from "../state.js";
+import * as store from "../store.js";
 import Membership from "./membership.js";
 
 function djb2(s) {
@@ -76,6 +77,8 @@ class LogLine extends Component {
 
 		let onNickClick = this.props.onNickClick;
 		let onChannelClick = this.props.onChannelClick;
+		let onVerifyClick = this.props.onVerifyClick;
+
 		function createNick(nick) {
 			return html`
 				<${Nick} nick=${nick} onClick=${() => onNickClick(nick)}/>
@@ -95,11 +98,11 @@ class LogLine extends Component {
 
 		let lineClass = "";
 		let content;
-		let invitee;
+		let invitee, target, account;
 		switch (msg.command) {
 		case "NOTICE":
 		case "PRIVMSG":
-			let target = msg.params[0];
+			target = msg.params[0];
 			let text = msg.params[1];
 
 			let ctcp = irc.parseCTCP(msg);
@@ -122,7 +125,7 @@ class LogLine extends Component {
 			}
 
 			let status = null;
-			let allowedPrefixes = server.isupport.get("STATUSMSG");
+			let allowedPrefixes = server.statusMsg;
 			if (target !== buf.name && allowedPrefixes) {
 				let parts = irc.parseTargetPrefix(target, allowedPrefixes);
 				if (parts.name === buf.name) {
@@ -161,9 +164,14 @@ class LogLine extends Component {
 			`;
 			break;
 		case "MODE":
+			target = msg.params[0];
 			content = html`
 				* ${createNick(msg.prefix.name)} sets mode ${msg.params.slice(1).join(" ")}
 			`;
+			// TODO: case-mapping
+			if (buf.name !== target) {
+				content = html`${content} on ${target}`;
+			}
 			break;
 		case "TOPIC":
 			let topic = msg.params[1];
@@ -199,11 +207,33 @@ class LogLine extends Component {
 			content = linkify(stripANSI(msg.params[1]), onChannelClick);
 			break;
 		case irc.RPL_LOGGEDIN:
-			let account = msg.params[2];
+			account = msg.params[2];
 			content = html`You are now authenticated as ${account}`;
 			break;
 		case irc.RPL_LOGGEDOUT:
 			content = html`You are now unauthenticated`;
+			break;
+		case "REGISTER":
+			account = msg.params[1];
+			let reason = msg.params[2];
+
+			function handleVerifyClick(event) {
+				event.preventDefault();
+				onVerifyClick(account, reason);
+			}
+
+			switch (msg.params[0]) {
+			case "SUCCESS":
+				content = html`A new account has been created, you are now authenticated as ${account}`;
+				break;
+			case "VERIFICATION_REQUIRED":
+				content = html`A new account has been created, but you need to <a href="#" onClick=${handleVerifyClick}>verify it</a>: ${linkify(reason)}`;
+				break;
+			}
+			break;
+		case "VERIFY":
+			account = msg.params[1];
+			content = html`The new account has been verified, you are now authenticated as ${account}`;
 			break;
 		case irc.RPL_UMODEIS:
 			let mode = msg.params[1];
@@ -224,7 +254,11 @@ class LogLine extends Component {
 			if (irc.isError(msg.command) && msg.command != irc.ERR_NOMOTD) {
 				lineClass = "error";
 			}
-			content = html`${msg.command} ${msg.params.join(" ")}`;
+			content = html`${msg.command} ${linkify(msg.params.join(" "))}`;
+		}
+
+		if (!content) {
+			return null;
 		}
 
 		return html`
@@ -292,7 +326,9 @@ class FoldGroup extends Component {
 				return;
 			}
 
-			let plural = byCommand[cmd].length > 1;
+			let nicks = new Set(byCommand[cmd].map((msg) => msg.prefix.name));
+
+			let plural = nicks.size > 1;
 			let action;
 			switch (cmd) {
 			case "JOIN":
@@ -312,9 +348,7 @@ class FoldGroup extends Component {
 				content.push(", ");
 			}
 
-			let nicks = byCommand[cmd].map((msg) => msg.prefix.name);
-
-			content.push(createNickList(nicks, createNick));
+			content.push(createNickList([...nicks], createNick));
 			content.push(" " + action);
 		});
 
@@ -410,6 +444,82 @@ class NotificationNagger extends Component {
 	}
 }
 
+class ProtocolHandlerNagger extends Component {
+	state = { nag: true };
+
+	constructor(props) {
+		super(props);
+
+		this.handleClick = this.handleClick.bind(this);
+
+		this.state.nag = !store.naggedProtocolHandler.load();
+	}
+
+	handleClick(event) {
+		event.preventDefault();
+
+		let url = window.location.origin + window.location.pathname + "?open=%s";
+		try {
+			navigator.registerProtocolHandler("irc", url);
+			navigator.registerProtocolHandler("ircs", url);
+		} catch (err) {
+			console.error("Failed to register protocol handler: ", err);
+		}
+
+		store.naggedProtocolHandler.put(true);
+		this.setState({ nag: false });
+	}
+
+	render() {
+		if (!navigator.registerProtocolHandler || !this.state.nag) {
+			return null;
+		}
+		let name = this.props.bouncerName || "this bouncer";
+		return html`
+			<div class="logline">
+				<${Timestamp}/>
+				${" "}
+				<a href="#" onClick=${this.handleClick}>Register our protocol handler</a> to open IRC links with ${name}
+			</div>
+		`;
+	}
+}
+
+function AccountNagger({ server, onAuthClick, onRegisterClick }) {
+	let accDesc = "an account on this server";
+	if (server.name) {
+		accDesc = "a " + server.name + " account";
+	}
+
+	function handleAuthClick(event) {
+		event.preventDefault();
+		onAuthClick();
+	}
+	function handleRegisterClick(event) {
+		event.preventDefault();
+		onRegisterClick();
+	}
+
+	let msg = [html`
+		You are unauthenticated on this server,
+		${" "}
+		<a href="#" onClick=${handleAuthClick}>login</a>
+		${" "}
+	`];
+
+	if (server.supportsAccountRegistration) {
+		msg.push(html`or <a href="#" onClick=${handleRegisterClick}>register</a> ${accDesc}`);
+	} else {
+		msg.push(html`if you have ${accDesc}`);
+	}
+
+	return html`
+		<div class="logline">
+			<${Timestamp}/> ${msg}
+		</div>
+	`;
+}
+
 class DateSeparator extends Component {
 	constructor(props) {
 		super(props);
@@ -448,18 +558,35 @@ export default class Buffer extends Component {
 
 	render() {
 		let buf = this.props.buffer;
-		let server = this.props.server;
 		if (!buf) {
 			return null;
 		}
+
+		let server = this.props.server;
+		let bouncerNetwork = this.props.bouncerNetwork;
+		let serverName = server.name;
 
 		let children = [];
 		if (buf.type == BufferType.SERVER) {
 			children.push(html`<${NotificationNagger}/>`);
 		}
+		if (buf.type == BufferType.SERVER && server.isBouncer && !server.bouncerNetID) {
+			children.push(html`<${ProtocolHandlerNagger} bouncerName=${serverName}/>`);
+		}
+		if (buf.type == BufferType.SERVER && server.status == ServerStatus.REGISTERED && server.supportsSASLPlain && !server.account) {
+			children.push(html`
+				<${AccountNagger}
+					server=${server}
+					onAuthClick=${this.props.onAuthClick}
+					onRegisterClick=${this.props.onRegisterClick}
+				/>
+			`);
+		}
 
 		let onChannelClick = this.props.onChannelClick;
 		let onNickClick = this.props.onNickClick;
+		let onVerifyClick = this.props.onVerifyClick;
+
 		function createLogLine(msg) {
 			return html`
 				<${LogLine}
@@ -469,6 +596,7 @@ export default class Buffer extends Component {
 					server=${server}
 					onChannelClick=${onChannelClick}
 					onNickClick=${onNickClick}
+					onVerifyClick=${onVerifyClick}
 				/>
 			`;
 		}

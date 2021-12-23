@@ -93,6 +93,17 @@ function givemode(app, args, mode) {
 }
 
 export default {
+	"away": {
+		usage: "[message]",
+		description: "Set away message",
+		execute: (app, args) => {
+			const params = []
+			if (args.length) {
+				params.push(args.join(" "));
+			}
+			getActiveClient(app).send({command: "AWAY", params});
+		},
+	},
 	"ban": {
 		usage: "[nick]",
 		description: "Ban a user from the channel, or display the current ban list",
@@ -322,10 +333,11 @@ export default {
 		execute: (app, args) => {
 			let newRealname = args.join(" ");
 			let client = getActiveClient(app);
-			if (!client.enabledCaps["setname"]) {
+			if (!client.caps.enabled.has("setname")) {
 				throw new Error("Server doesn't support changing the realname");
 			}
 			client.send({ command: "SETNAME", params: [newRealname] });
+			// TODO: save to local storage
 		},
 	},
 	"stats": {
@@ -408,6 +420,14 @@ export default {
 				throw new Error("Missing nick");
 			}
 			getActiveClient(app).send({ command: "WHOWAS", params: args });
+			markServerBufferUnread(app);
+		},
+	},
+	"list": {
+		usage: "[filter]",
+		description: "Retrieve a list of channels from a network",
+		execute: (app, args) => {
+			getActiveClient(app).send({ command: "LIST", params: args });
 			markServerBufferUnread(app);
 		},
 	},

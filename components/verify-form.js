@@ -1,8 +1,9 @@
 import { html, Component } from "../lib/index.js";
+import linkify from "../lib/linkify.js";
 
-export default class JoinForm extends Component {
+export default class RegisterForm extends Component {
 	state = {
-		channel: "#",
+		code: "",
 	};
 
 	constructor(props) {
@@ -10,10 +11,6 @@ export default class JoinForm extends Component {
 
 		this.handleChange = this.handleChange.bind(this);
 		this.handleSubmit = this.handleSubmit.bind(this);
-
-		if (props.channel) {
-			this.state.channel = props.channel;
-		}
 	}
 
 	handleChange(event) {
@@ -25,24 +22,23 @@ export default class JoinForm extends Component {
 	handleSubmit(event) {
 		event.preventDefault();
 
-		let params = {
-			channel: this.state.channel,
-		};
-
-		this.props.onSubmit(params);
+		this.props.onSubmit(this.state.code);
 	}
 
 	render() {
 		return html`
 			<form onChange=${this.handleChange} onSubmit=${this.handleSubmit}>
-				<label>
-					Channel:<br/>
-					<input type="text" name="channel" value=${this.state.channel} autofocus required/>
-				</label>
-				<br/>
+				<p>Your account <strong>${this.props.account}</strong> has been created, but a verification code is required to complete the registration.</p>
 
-				<br/>
-				<button>Join</button>
+				<p>${linkify(this.props.message)}</p>
+
+				<label>
+					Verification code:<br/>
+					<input type="text" name="code" value=${this.state.code} required autofocus autocomplete="off"/>
+				</label>
+				<br/><br/>
+
+				<button>Verify account</button>
 			</form>
 		`;
 	}

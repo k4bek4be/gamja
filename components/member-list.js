@@ -13,7 +13,8 @@ class MemberItem extends Component {
 
 	shouldComponentUpdate(nextProps) {
 		return this.props.nick !== nextProps.nick
-			|| this.props.membership !== nextProps.membership;
+			|| this.props.membership !== nextProps.membership
+			|| this.props.user !== nextProps.user;
 	}
 
 	handleClick(event) {
@@ -43,6 +44,7 @@ class MemberItem extends Component {
 
 		let title = null;
 		let user = this.props.user;
+		let classes = ["nick"];
 		if (user) {
 			let mask = "";
 			if (user.username && user.hostname) {
@@ -61,13 +63,18 @@ class MemberItem extends Component {
 			if (user.account) {
 				title += `\nAuthenticated as ${user.account}`;
 			}
+
+			if (user.away) {
+				classes.push("away");
+				title += "\nAway";
+			}
 		}
 
 		return html`
 			<li>
 				<a
 					href=${getNickURL(this.props.nick)}
-					class="nick"
+					class=${classes.join(" ")}
 					title=${title}
 					onClick=${this.handleClick}
 				>
@@ -99,7 +106,8 @@ function sortMembers(a, b) {
 
 export default class MemberList extends Component {
 	shouldComponentUpdate(nextProps) {
-		return this.props.members !== nextProps.members;
+		return this.props.members !== nextProps.members
+			|| this.props.users !== nextProps.users;
 	}
 
 	render() {

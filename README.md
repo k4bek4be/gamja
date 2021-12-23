@@ -12,6 +12,9 @@ First install dependencies:
 
     npm install --production
 
+Then configure an HTTP server to serve the gamja files. Below are some
+server-specific instructions.
+
 ### [soju]
 
 Add a WebSocket listener to soju, e.g. `listen wss://127.0.0.1:8080`.
@@ -37,6 +40,10 @@ If you use nginx as a reverse HTTP proxy, make sure to bump the default read
 timeout to a value higher than the IRC server PING interval. Example:
 
 ```
+location / {
+	root /path/to/gamja;
+}
+
 location /socket {
 	proxy_pass http://127.0.0.1:8080;
 	proxy_read_timeout 600s;
@@ -54,20 +61,20 @@ server doesn't send PINGs, you can set the `server.ping` option in
 
 ### Development server
 
-Start your IRC WebSocket server, e.g. on port 8080. Then run:
+If you don't have an IRC WebSocket server at hand, gamja's development server
+can be used. For instance, to run gamja on Libera Chat:
 
-    npm install
-    npm start
+    npm install --include=dev
+    npm start -- irc.libera.chat
 
-This will start a development HTTP server for gamja. Connect to it and append
-`?server=ws://localhost:8080` to the URL.
+See `npm start -- -h` for a list of options.
 
 ### Production build
 
-Optionally, [Parcel] can be used to build a minified version of gamja. Install
-Parcel and then run:
+Optionally, [Parcel] can be used to build a minified version of gamja.
 
-    parcel build
+    npm install --include=dev
+    npm run build
 
 ## Query parameters
 
@@ -76,6 +83,8 @@ gamja settings can be overridden using URL query parameters:
 - `server`: path or URL to the WebSocket server
 - `nick`: nickname
 - `channels`: comma-separated list of channels to join (`#` needs to be escaped)
+- `open`: [IRC URL] to open
+- `debug`: if set to 1, debug mode is enabled
 
 Alternatively, the channels can be set with the URL fragment (ie, by just
 appending the channel name to the gamja URL).
@@ -113,7 +122,7 @@ gamja default settings can be set using a `config.json` file at the root:
 ## Contributing
 
 Send patches on the [mailing list], report bugs on the [issue tracker]. Discuss
-in #soju on Libera Chat.
+in [#soju on Libera Chat].
 
 ## License
 
@@ -127,3 +136,5 @@ Copyright (C) 2020 The gamja Contributors
 [mailing list]: https://lists.sr.ht/~emersion/public-inbox
 [issue tracker]: https://todo.sr.ht/~emersion/gamja
 [Parcel]: https://parceljs.org
+[IRC URL]: https://datatracker.ietf.org/doc/html/draft-butcher-irc-url-04
+[#soju on Libera Chat]: ircs://irc.libera.chat/#soju
