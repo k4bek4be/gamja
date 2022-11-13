@@ -1,5 +1,6 @@
 import * as irc from "./lib/irc.js";
 import Client from "./lib/client.js";
+import { createContext } from "./lib/index.js";
 
 export const SERVER_BUFFER = "*";
 
@@ -33,6 +34,14 @@ export const ReceiptType = {
 	DELIVERED: "delivered",
 	READ: "read",
 };
+
+export const BufferEventsDisplayMode = {
+	FOLD: "fold",
+	EXPAND: "expand",
+	HIDE: "hide",
+};
+
+export const SettingsContext = createContext("settings");
 
 export function getNickURL(nick) {
 	return "irc:///" + encodeURIComponent(nick) + ",isuser";
@@ -85,6 +94,42 @@ export function getServerName(server, bouncerNetwork) {
 	}
 }
 
+export function receiptFromMessage(msg) {
+	// At this point all messages are supposed to have a time tag.
+	// App.addMessage ensures this is the case even if the server doesn't
+	// support server-time.
+	if (!msg.tags.time) {
+		throw new Error("Missing time message tag");
+	}
+	return { time: msg.tags.time };
+}
+
+export function isReceiptBefore(a, b) {
+	if (!b) {
+		return false;
+	}
+	if (!a) {
+		return true;
+	}
+	if (!a.time || !b.time) {
+		throw new Error("Missing receipt time");
+	}
+	return a.time <= b.time;
+}
+
+export function isMessageBeforeReceipt(msg, receipt) {
+	if (!receipt) {
+		return false;
+	}
+	if (!msg.tags.time) {
+		throw new Error("Missing time message tag");
+	}
+	if (!receipt.time) {
+		throw new Error("Missing receipt time");
+	}
+	return msg.tags.time <= receipt.time;
+}
+
 function updateState(state, updater) {
 	let updated;
 	if (typeof updater === "function") {
@@ -112,7 +157,7 @@ function compareBuffers(a, b) {
 		return isServerBuffer(b) ? 1 : -1;
 	}
 	if (a.name != b.name) {
-		return a.name > b.name ? 1 : -1;
+		return a.name.localeCompare(b.name);
 	}
 	return 0;
 }
@@ -172,6 +217,11 @@ export const State = {
 			servers: new Map(),
 			buffers: new Map(),
 			activeBuffer: null,
+			bouncerNetworks: new Map(),
+			settings: {
+				secondsInTimestamps: true,
+				bufferEvents: BufferEventsDisplayMode.FOLD,
+			},
 		};
 	},
 	updateServer(state, id, updater) {
@@ -293,6 +343,7 @@ export const State = {
 			serverInfo: null, // if server
 			joined: false, // if channel
 			topic: null, // if channel
+			hasInitialWho: false, // if channel
 			members: new irc.CaseMapMap(null, client.cm), // if channel
 			messages: [],
 			unread: Unread.NONE,
@@ -301,6 +352,19 @@ export const State = {
 		bufferList = bufferList.sort(compareBuffers);
 		let buffers = new Map(bufferList.map((buf) => [buf.id, buf]));
 		return [id, { buffers }];
+	},
+	storeBouncerNetwork(state, id, attrs) {
+		let bouncerNetworks = new Map(state.bouncerNetworks);
+		bouncerNetworks.set(id, {
+			...bouncerNetworks.get(id),
+			...attrs,
+		});
+		return { bouncerNetworks };
+	},
+	deleteBouncerNetwork(state, id) {
+		let bouncerNetworks = new Map(state.bouncerNetworks);
+		bouncerNetworks.delete(id);
+		return { bouncerNetworks };
 	},
 	handleMessage(state, msg, serverID, client) {
 		function updateServer(updater) {
@@ -404,6 +468,10 @@ export const State = {
 			if (who.flags !== undefined) {
 				who.away = who.flags.indexOf("G") >= 0; // H for here, G for gone
 				who.operator = who.flags.indexOf("*") >= 0;
+				let botFlag = client.isupport.bot();
+				if (botFlag) {
+					who.bot = who.flags.indexOf(botFlag) >= 0;
+				}
 				delete who.flags;
 			}
 

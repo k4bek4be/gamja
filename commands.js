@@ -54,19 +54,23 @@ function markServerBufferUnread(app) {
 }
 
 const join = {
-	usage: "<name>",
+	usage: "<name> [password]",
 	description: "Join a channel",
 	execute: (app, args) => {
 		let channel = args[0];
 		if (!channel) {
 			throw new Error("Missing channel name");
 		}
-		app.open(channel);
+		if (args.length > 1) {
+			app.open(channel, null, args[1]);
+		} else {
+			app.open(channel);
+		}
 	},
 };
 
 const kick = {
-	usage: "<nick>",
+	usage: "<nick> [comment]",
 	description: "Remove a user from the channel",
 	execute: (app, args) => {
 		let nick = args[0];
@@ -76,6 +80,22 @@ const kick = {
 			params.push(args.slice(1).join(" "));
 		}
 		getActiveClient(app).send({ command: "KICK", params });
+	},
+};
+
+const ban = {
+	usage: "[nick]",
+	description: "Ban a user from the channel, or display the current ban list",
+	execute: (app, args) => {
+		if (args.length == 0) {
+			let activeChannel = getActiveChannel(app);
+			getActiveClient(app).send({
+				command: "MODE",
+				params: [activeChannel, "+b"],
+			});
+		} else {
+			return setUserHostMode(app, args, "+b");
+		}
 	},
 };
 
@@ -104,21 +124,7 @@ export default {
 			getActiveClient(app).send({command: "AWAY", params});
 		},
 	},
-	"ban": {
-		usage: "[nick]",
-		description: "Ban a user from the channel, or display the current ban list",
-		execute: (app, args) => {
-			if (args.length == 0) {
-				let activeChannel = getActiveChannel(app);
-				getActiveClient(app).send({
-					command: "MODE",
-					params: [activeChannel, "+b"],
-				});
-			} else {
-				return setUserHostMode(app, args, "+b");
-			}
-		},
-	},
+	"ban": ban,
 	"buffer": {
 		usage: "<name>",
 		description: "Switch to a buffer",
@@ -393,7 +399,7 @@ export default {
 		execute: (app, args) => givemode(app, args, "+v"),
 	},
 	"who": {
-		usage: "[<mask> [o]]",
+		usage: "<mask>",
 		description: "Retrieve a list of users",
 		execute: (app, args) => {
 			getActiveClient(app).send({ command: "WHO", params: args });

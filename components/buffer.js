@@ -2,7 +2,7 @@ import { html, Component } from "../lib/index.js";
 import linkify from "../lib/linkify.js";
 import * as irc from "../lib/irc.js";
 import { strip as stripANSI } from "../lib/ansi.js";
-import { BufferType, ServerStatus, getNickURL, getChannelURL, getMessageURL } from "../state.js";
+import { BufferType, ServerStatus, BufferEventsDisplayMode, getNickURL, getChannelURL, getMessageURL, isMessageBeforeReceipt, SettingsContext } from "../state.js";
 import * as store from "../store.js";
 import Membership from "./membership.js";
 
@@ -27,15 +27,22 @@ function Nick(props) {
 	`;
 }
 
-function Timestamp({ date, url }) {
+function _Timestamp({ date, url, showSeconds }) {
 	if (!date) {
-		return html`<spam class="timestamp">--:--:--</span>`;
+		let timestamp = "--:--";
+		if (showSeconds) {
+			timestamp += ":--";
+		}
+		return html`<spam class="timestamp">${timestamp}</span>`;
 	}
 
 	let hh = date.getHours().toString().padStart(2, "0");
 	let mm = date.getMinutes().toString().padStart(2, "0");
-	let ss = date.getSeconds().toString().padStart(2, "0");
-	let timestamp = `${hh}:${mm}:${ss}`;
+	let timestamp = `${hh}:${mm}`;
+	if (showSeconds) {
+		let ss = date.getSeconds().toString().padStart(2, "0");
+		timestamp += ":" + ss;
+	}
 	return html`
 		<a
 			href=${url}
@@ -45,6 +52,16 @@ function Timestamp({ date, url }) {
 		>
 			${timestamp}
 		</a>
+	`;
+}
+
+function Timestamp(props) {
+	return html`
+		<${SettingsContext.Consumer}>
+			${(settings) => html`
+				<${_Timestamp} ...${props} showSeconds=${settings.secondsInTimestamps}/>
+			`}
+		</>
 	`;
 }
 
@@ -85,12 +102,8 @@ class LogLine extends Component {
 			`;
 		}
 		function createChannel(channel) {
-			function onClick(event) {
-				event.preventDefault();
-				onChannelClick(channel);
-			}
 			return html`
-				<a href=${getChannelURL(channel)} onClick=${onClick}>
+				<a href=${getChannelURL(channel)} onClick=${onChannelClick}>
 					${channel}
 				</a>
 			`;
@@ -131,6 +144,10 @@ class LogLine extends Component {
 				if (parts.name === buf.name) {
 					content = [html`(<${Membership} value=${parts.prefix}/>)`, " ", content];
 				}
+			}
+
+			if (msg.tags["+draft/channel-context"]) {
+				content = html`<em>(only visible to you)</em> ${content}`;
 			}
 
 			if (msg.isHighlight) {
@@ -531,10 +548,7 @@ class DateSeparator extends Component {
 
 	render() {
 		let date = this.props.date;
-		let YYYY = date.getFullYear().toString().padStart(4, "0");
-		let MM = (date.getMonth() + 1).toString().padStart(2, "0");
-		let DD = date.getDate().toString().padStart(2, "0");
-		let text = `${YYYY}-${MM}-${DD}`;
+		let text = date.toLocaleDateString([], { year: "numeric", month: "2-digit", day: "2-digit" });
 		return html`
 			<div class="separator date-separator">
 				${text}
@@ -553,7 +567,8 @@ function sameDate(d1, d2) {
 
 export default class Buffer extends Component {
 	shouldComponentUpdate(nextProps) {
-		return this.props.buffer !== nextProps.buffer;
+		return this.props.buffer !== nextProps.buffer ||
+			this.props.settings !== nextProps.settings;
 	}
 
 	render() {
@@ -564,6 +579,7 @@ export default class Buffer extends Component {
 
 		let server = this.props.server;
 		let bouncerNetwork = this.props.bouncerNetwork;
+		let settings = this.props.settings;
 		let serverName = server.name;
 
 		let children = [];
@@ -640,7 +656,11 @@ export default class Buffer extends Component {
 		buf.messages.forEach((msg) => {
 			let sep = [];
 
-			if (!hasUnreadSeparator && buf.type != BufferType.SERVER && buf.prevReadReceipt && msg.tags.time > buf.prevReadReceipt.time) {
+			if (settings.bufferEvents === BufferEventsDisplayMode.HIDE && canFoldMessage(msg)) {
+				return;
+			}
+
+			if (!hasUnreadSeparator && buf.type != BufferType.SERVER && !isMessageBeforeReceipt(msg, buf.prevReadReceipt)) {
 				sep.push(html`<${UnreadSeparator} key="unread"/>`);
 				hasUnreadSeparator = true;
 			}
@@ -658,7 +678,7 @@ export default class Buffer extends Component {
 			}
 
 			// TODO: consider checking the time difference too
-			if (canFoldMessage(msg)) {
+			if (settings.bufferEvents === BufferEventsDisplayMode.FOLD && canFoldMessage(msg)) {
 				foldMessages.push(msg);
 				return;
 			}

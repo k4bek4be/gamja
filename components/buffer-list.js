@@ -1,6 +1,6 @@
 import * as irc from "../lib/irc.js";
 import { html, Component } from "../lib/index.js";
-import { BufferType, Unread, getBufferURL, getServerName } from "../state.js";
+import { BufferType, Unread, ServerStatus, getBufferURL, getServerName } from "../state.js";
 
 function BufferItem(props) {
 	function handleClick(event) {
@@ -26,6 +26,15 @@ function BufferItem(props) {
 	if (props.buffer.unread != Unread.NONE) {
 		classes.push("unread-" + props.buffer.unread);
 	}
+	if (props.buffer.type === BufferType.SERVER) {
+		let isError = props.server.status === ServerStatus.DISCONNECTED;
+		if (props.bouncerNetwork && props.bouncerNetwork.error) {
+			isError = true;
+		}
+		if (isError) {
+			classes.push("error");
+		}
+	}
 
 	return html`
 		<li class="${classes.join(" ")}">
@@ -44,9 +53,8 @@ export default function BufferList(props) {
 		let server = props.servers.get(buf.server);
 
 		let bouncerNetwork = null;
-		let bouncerNetID = server.bouncerNetID;
-		if (bouncerNetID) {
-			bouncerNetwork = props.bouncerNetworks.get(bouncerNetID);
+		if (server.bouncerNetID) {
+			bouncerNetwork = props.bouncerNetworks.get(server.bouncerNetID);
 		}
 
 		return html`

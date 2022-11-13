@@ -44,6 +44,9 @@ export default function BufferHeader(props) {
 				switch (props.bouncerNetwork.state) {
 				case "disconnected":
 					description = "Bouncer disconnected from network";
+					if (props.bouncerNetwork.error) {
+						description += ": " + props.bouncerNetwork.error;
+					}
 					break;
 				case "connecting":
 					description = "Bouncer connecting to network...";
@@ -74,6 +77,12 @@ export default function BufferHeader(props) {
 				onClick=${props.onReconnect}
 			>Reconnect</button>
 		`;
+		let settingsButton = html`
+			<button
+				key="settings"
+				onClick="${props.onOpenSettings}"
+			>Settings</button>
+		`;
 
 		if (props.server.isBouncer) {
 			if (props.server.bouncerNetID) {
@@ -99,13 +108,7 @@ export default function BufferHeader(props) {
 				} else if (props.server.status === ServerStatus.DISCONNECTED) {
 					actions.push(reconnectButton);
 				}
-				actions.push(html`
-					<button
-						key="disconnect"
-						class="danger"
-						onClick=${props.onClose}
-					>Disconnect</button>
-				`);
+				actions.push(settingsButton);
 			}
 		} else {
 			if (fullyConnected) {
@@ -113,13 +116,7 @@ export default function BufferHeader(props) {
 			} else if (props.server.status === ServerStatus.DISCONNECTED) {
 				actions.push(reconnectButton);
 			}
-			actions.push(html`
-				<button
-					key="disconnect"
-					class="danger"
-					onClick=${props.onClose}
-				>Disconnect</button>
-			`);
+			actions.push(settingsButton);
 		}
 		break;
 	case BufferType.CHANNEL:
@@ -188,6 +185,10 @@ export default function BufferHeader(props) {
 			if (props.user.operator) {
 				let desc = "This user is a server operator, they have administrator privileges.";
 				details.push(html`<abbr title=${desc}>server operator</abbr>`);
+			}
+			if (props.user.bot) {
+				let desc = "This user is an automated bot.";
+				details.push(html`<abbr title=${desc}>bot</abbr>`);
 			}
 			details = details.map((item, i) => {
 				if (i === 0) {

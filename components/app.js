@@ -1,5 +1,6 @@
 import * as irc from "../lib/irc.js";
 import Client from "../lib/client.js";
+import * as oauth2 from "../lib/oauth2.js";
 import Buffer from "./buffer.js";
 import BufferList from "./buffer-list.js";
 import BufferHeader from "./buffer-header.js";
@@ -11,12 +12,13 @@ import NetworkForm from "./network-form.js";
 import AuthForm from "./auth-form.js";
 import RegisterForm from "./register-form.js";
 import VerifyForm from "./verify-form.js";
+import SettingsForm from "./settings-form.js";
 import Composer from "./composer.js";
 import ScrollManager from "./scroll-manager.js";
 import Dialog from "./dialog.js";
 import { html, Component, createRef } from "../lib/index.js";
 import { strip as stripANSI } from "../lib/ansi.js";
-import { SERVER_BUFFER, BufferType, ReceiptType, ServerStatus, Unread, State, getServerName } from "../state.js";
+import { SERVER_BUFFER, BufferType, ReceiptType, ServerStatus, Unread, BufferEventsDisplayMode, State, getServerName, receiptFromMessage, isReceiptBefore, isMessageBeforeReceipt, SettingsContext } from "../state.js";
 import commands from "../commands.js";
 import { setup as setupKeybindings } from "../keybindings.js";
 import * as store from "../store.js";
@@ -60,11 +62,11 @@ function isProduction() {
 function parseQueryString() {
 	let query = window.location.search.substring(1);
 	let params = {};
-	query.split('&').forEach((s) => {
+	query.split("&").forEach((s) => {
 		if (!s) {
 			return;
 		}
-		let pair = s.split('=');
+		let pair = s.split("=");
 		params[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1] || "");
 	});
 	return params;
@@ -118,20 +120,9 @@ function fillConnectParams(params) {
 	return params;
 }
 
-function debounce(f, delay) {
-	let timeout = null;
-	return (...args) => {
-		clearTimeout(timeout);
-		timeout = setTimeout(() => {
-			timeout = null;
-			f(...args);
-		}, delay);
-	};
-}
-
 function showNotification(title, options) {
 	if (!window.Notification || Notification.permission !== "granted") {
-		return new EventTarget();
+		return null;
 	}
 
 	// This can still fail due to:
@@ -140,8 +131,30 @@ function showNotification(title, options) {
 		return new Notification(title, options);
 	} catch (err) {
 		console.error("Failed to show notification: ", err);
-		return new EventTarget();
+		return null;
 	}
+}
+
+function getReceipt(stored, type) {
+	if (!stored || !stored.receipts) {
+		return null;
+	}
+	return stored.receipts[ReceiptType.READ];
+}
+
+function getLatestReceipt(bufferStore, server, type) {
+	let buffers = bufferStore.list(server);
+	let last = null;
+	for (let buf of buffers) {
+		if (buf.name === "*") {
+			continue;
+		}
+		let receipt = getReceipt(buf, type);
+		if (isReceiptBefore(last, receipt)) {
+			last = receipt;
+		}
+	}
+	return last;
 }
 
 let lastErrorID = 0;
@@ -159,8 +172,8 @@ export default class App extends Component {
 			saslExternal: false,
 			autoconnect: false,
 			autojoin: [],
+			ping: 0,
 		},
-		bouncerNetworks: new Map(),
 		connectForm: true,
 		loading: true,
 		dialog: null,
@@ -184,6 +197,8 @@ export default class App extends Component {
 	 * confirmation for security reasons.
 	 */
 	autoOpenURL = null;
+	messageNotifications = new Set();
+	baseTitle = null;
 
 	constructor(props) {
 		super(props);
@@ -208,10 +223,14 @@ export default class App extends Component {
 		this.handleRegisterSubmit = this.handleRegisterSubmit.bind(this);
 		this.handleVerifyClick = this.handleVerifyClick.bind(this);
 		this.handleVerifySubmit = this.handleVerifySubmit.bind(this);
+		this.handleOpenSettingsClick = this.handleOpenSettingsClick.bind(this);
+		this.handleSettingsChange = this.handleSettingsChange.bind(this);
 
-		this.saveReceipts = debounce(this.saveReceipts.bind(this), 500);
+		this.state.settings = {
+			...this.state.settings,
+			...store.settings.load(),
+		};
 
-		this.receipts = store.receipts.load();
 		this.bufferStore = new store.Buffer();
 
 		configPromise.then((config) => {
@@ -231,29 +250,37 @@ export default class App extends Component {
 	 * - Default server URL constructed from the current URL location (this is
 	 *   done in fillConnectParams)
 	 */
-	handleConfig(config) {
-		this.setState({ loading: false });
-
+	async handleConfig(config) {
 		let connectParams = { ...this.state.connectParams };
 
-		if (config.server) {
-			if (typeof config.server.url === "string") {
-				connectParams.url = config.server.url;
-			}
-			if (Array.isArray(config.server.autojoin)) {
-				connectParams.autojoin = config.server.autojoin;
-			} else if (typeof config.server.autojoin === "string") {
-				connectParams.autojoin = [config.server.autojoin];
-			}
-			if (typeof config.server.nick === "string") {
-				connectParams.nick = config.server.nick;
-			}
-			if (typeof config.server.autoconnect === "boolean") {
-				connectParams.autoconnect = config.server.autoconnect;
-			}
-			if (config.server.auth === "external") {
-				connectParams.saslExternal = true;
-			}
+		if (typeof config.server.url === "string") {
+			connectParams.url = config.server.url;
+		}
+		if (Array.isArray(config.server.autojoin)) {
+			connectParams.autojoin = config.server.autojoin;
+		} else if (typeof config.server.autojoin === "string") {
+			connectParams.autojoin = [config.server.autojoin];
+		}
+		if (typeof config.server.nick === "string") {
+			connectParams.nick = config.server.nick;
+		}
+		if (typeof config.server.autoconnect === "boolean") {
+			connectParams.autoconnect = config.server.autoconnect;
+		}
+		if (config.server.auth === "external") {
+			connectParams.saslExternal = true;
+		}
+		if (typeof config.server.ping === "number") {
+			connectParams.ping = config.server.ping;
+		}
+
+		if (connectParams.autoconnect && config.server.auth === "mandatory") {
+			console.error("Error in config.json: cannot set server.autoconnect = true and server.auth = \"mandatory\"");
+			connectParams.autoconnect = false;
+		}
+		if (config.server.auth === "oauth2" && (!config.oauth2 || !config.oauth2.url || !config.oauth2.client_id)) {
+			console.error("Error in config.json: server.auth = \"oauth2\" requires oauth2 settings");
+			config.server.auth = null;
 		}
 
 		let autoconnect = store.autoconnect.load();
@@ -299,6 +326,48 @@ export default class App extends Component {
 
 		this.config = config;
 
+		if (!connectParams.nick && connectParams.autoconnect) {
+			connectParams.nick = "user-*";
+		}
+		if (connectParams.nick && connectParams.nick.includes("*")) {
+			let placeholder = Math.random().toString(36).substr(2, 7);
+			connectParams.nick = connectParams.nick.replace("*", placeholder);
+		}
+
+		if (config.server.auth === "oauth2" && !connectParams.saslOauthBearer) {
+			if (queryParams.error) {
+				console.error("OAuth 2.0 authorization failed: ", queryParams.error);
+				this.showError("Authentication failed: " + (queryParams.error_description || queryParams.error));
+				return;
+			}
+
+			if (!queryParams.code) {
+				this.redirectOauth2Authorize();
+				return;
+			}
+
+			// Strip code from query params, to prevent page refreshes from
+			// trying to exchange the code again
+			let url = new URL(window.location.toString());
+			url.searchParams.delete("code");
+			url.searchParams.delete("state");
+			window.history.replaceState(null, "", url.toString());
+
+			let saslOauthBearer;
+			try {
+				saslOauthBearer = await this.exchangeOauth2Code(queryParams.code);
+			} catch (err) {
+				this.showError(err);
+				return;
+			}
+
+			connectParams.saslOauthBearer = saslOauthBearer;
+
+			if (saslOauthBearer.username && !connectParams.nick) {
+				connectParams.nick = saslOauthBearer.username;
+			}
+		}
+
 		if (autojoin.length > 0) {
 			if (connectParams.autoconnect) {
 				// Ask the user whether they want to join that new channel.
@@ -309,12 +378,65 @@ export default class App extends Component {
 			}
 		}
 
-		this.setState({ connectParams: connectParams });
+		this.setState({ loading: false, connectParams: connectParams });
 
 		if (connectParams.autoconnect) {
 			this.setState({ connectForm: false });
 			this.connect(connectParams);
 		}
+	}
+
+	async redirectOauth2Authorize() {
+		let serverMetadata;
+		try {
+			serverMetadata = await oauth2.fetchServerMetadata(this.config.oauth2.url);
+		} catch (err) {
+			console.error("Failed to fetch OAuth 2.0 server metadata:", err);
+			this.showError("Failed to fetch OAuth 2.0 server metadata");
+		}
+
+		oauth2.redirectAuthorize({
+			serverMetadata,
+			clientId: this.config.oauth2.client_id,
+			redirectUri: window.location.toString(),
+			scope: this.config.oauth2.scope,
+		});
+	}
+
+	async exchangeOauth2Code(code) {
+		let serverMetadata = await oauth2.fetchServerMetadata(this.config.oauth2.url);
+
+		let redirectUri = new URL(window.location.toString());
+		redirectUri.searchParams.delete("code");
+		redirectUri.searchParams.delete("state");
+
+		let data = await oauth2.exchangeCode({
+			serverMetadata,
+			redirectUri: redirectUri.toString(),
+			code,
+			clientId: this.config.oauth2.client_id,
+			clientSecret: this.config.oauth2.client_secret,
+		});
+
+		// TODO: handle expires_in/refresh_token
+		let token = data.access_token;
+
+		let username = null;
+		if (serverMetadata.introspection_endpoint) {
+			try {
+				let data = await oauth2.introspectToken({
+					serverMetadata,
+					token,
+					clientId: this.config.oauth2.client_id,
+					clientSecret: this.config.oauth2.client_secret,
+				});
+				username = data.username;
+			} catch (err) {
+				console.warn("Failed to introspect OAuth 2.0 token:", err);
+			}
+		}
+
+		return { token, username };
 	}
 
 	showError(err) {
@@ -392,6 +514,17 @@ export default class App extends Component {
 		return id;
 	}
 
+	sendReadReceipt(client, storedBuffer) {
+		if (!client.supportsReadMarker()) {
+			return;
+		}
+		let readReceipt = storedBuffer.receipts[ReceiptType.READ];
+		if (storedBuffer.name === "*" || !readReceipt) {
+			return;
+		}
+		client.setReadMarker(storedBuffer.name, readReceipt.time);
+	}
+
 	switchBuffer(id) {
 		let buf;
 		this.setState((state) => {
@@ -399,87 +532,62 @@ export default class App extends Component {
 			if (!buf) {
 				return;
 			}
-			return { activeBuffer: buf.id };
+
+			let client = this.clients.get(buf.server);
+			let stored = this.bufferStore.get({ name: buf.name, server: client.params });
+			let prevReadReceipt = getReceipt(stored, ReceiptType.READ);
+			// TODO: only mark as read if user scrolled at the bottom
+			let update = State.updateBuffer(state, buf.id, {
+				unread: Unread.NONE,
+				prevReadReceipt,
+			});
+
+			return { ...update, activeBuffer: buf.id };
 		}, () => {
 			if (!buf) {
 				return;
 			}
 
-			let prevReadReceipt = this.getReceipt(buf.name, ReceiptType.READ);
-			// TODO: only mark as read if user scrolled at the bottom
-			this.setBufferState(buf.id, {
-				unread: Unread.NONE,
-				prevReadReceipt,
-			});
-
 			if (this.buffer.current) {
 				this.buffer.current.focus();
 			}
 
+			let client = this.clients.get(buf.server);
+
+			for (let notif of this.messageNotifications) {
+				if (client.cm(notif.data.bufferName) === client.cm(buf.name)) {
+					notif.close();
+				}
+			}
+
 			if (buf.messages.length > 0) {
 				let lastMsg = buf.messages[buf.messages.length - 1];
-				this.setReceipt(buf.name, ReceiptType.READ, lastMsg);
-
-				let client = this.clients.get(buf.server);
-				this.bufferStore.put({
+				let stored = {
 					name: buf.name,
 					server: client.params,
 					unread: Unread.NONE,
-				});
+					receipts: { [ReceiptType.READ]: receiptFromMessage(lastMsg) },
+				};
+				if (this.bufferStore.put(stored)) {
+					this.sendReadReceipt(client, stored);
+				}
 			}
 
 			let server = this.state.servers.get(buf.server);
 			if (buf.type === BufferType.NICK && !server.users.has(buf.name)) {
 				this.whoUserBuffer(buf.name, buf.server);
 			}
-		});
-	}
 
-	saveReceipts() {
-		store.receipts.put(this.receipts);
-	}
-
-	getReceipt(target, type) {
-		let receipts = this.receipts.get(target);
-		if (!receipts) {
-			return undefined;
-		}
-		return receipts[type];
-	}
-
-	hasReceipt(target, type, msg) {
-		let receipt = this.getReceipt(target, type);
-		return receipt && msg.tags.time <= receipt.time;
-	}
-
-	setReceipt(target, type, msg) {
-		let receipt = this.getReceipt(target, type);
-		if (this.hasReceipt(target, type, msg)) {
-			return;
-		}
-		// TODO: this doesn't trigger a redraw
-		this.receipts.set(target, {
-			...this.receipts.get(target),
-			[type]: { time: msg.tags.time },
-		});
-		this.saveReceipts();
-	}
-
-	latestReceipt(type) {
-		let last = null;
-		this.receipts.forEach((receipts, target) => {
-			if (target === "*") {
-				return;
+			if (buf.type === BufferType.CHANNEL && !buf.hasInitialWho) {
+				this.whoChannelBuffer(buf.name, buf.server);
 			}
-			let delivery = receipts[type];
-			if (!delivery || !delivery.time) {
-				return;
-			}
-			if (!last || delivery.time > last.time) {
-				last = delivery;
+
+			if (buf.type !== BufferType.SERVER) {
+				document.title = buf.name + ' · ' + this.baseTitle;
+			} else {
+				document.title = this.baseTitle;
 			}
 		});
-		return last;
 	}
 
 	addMessage(serverID, bufName, msg) {
@@ -496,8 +604,12 @@ export default class App extends Component {
 			msg.tags.time = irc.formatDate(new Date());
 		}
 
-		let isDelivered = this.hasReceipt(bufName, ReceiptType.DELIVERED, msg);
-		let isRead = this.hasReceipt(bufName, ReceiptType.READ, msg);
+		let stored = this.bufferStore.get({ name: bufName, server: client.params });
+		let deliveryReceipt = getReceipt(stored, ReceiptType.DELIVERED);
+		let readReceipt = getReceipt(stored, ReceiptType.READ);
+		let isDelivered = isMessageBeforeReceipt(msg, deliveryReceipt);
+		let isRead = isMessageBeforeReceipt(msg, readReceipt);
+
 		// TODO: messages coming from infinite scroll shouldn't trigger notifications
 
 		if (client.isMyNick(msg.prefix.name)) {
@@ -528,12 +640,19 @@ export default class App extends Component {
 				let notif = showNotification(title, {
 					body: stripANSI(text),
 					requireInteraction: true,
-					tag: "msg," + msg.prefix.name + "," + bufName,
+					tag: "msg,server=" + serverID + ",from=" + msg.prefix.name + ",to=" + bufName,
+					data: { bufferName: bufName, message: msg },
 				});
-				notif.addEventListener("click", () => {
-					// TODO: scroll to message
-					this.switchBuffer({ server: serverID, name: bufName });
-				});
+				if (notif) {
+					notif.addEventListener("click", () => {
+						// TODO: scroll to message
+						this.switchBuffer({ server: serverID, name: bufName });
+					});
+					notif.addEventListener("close", () => {
+						this.messageNotifications.delete(notif);
+					});
+					this.messageNotifications.add(notif);
+				}
 			}
 		}
 		if (msg.command === "INVITE" && client.isMyNick(msg.params[0])) {
@@ -543,21 +662,30 @@ export default class App extends Component {
 			let notif = new Notification("Invitation to " + channel, {
 				body: msg.prefix.name + " has invited you to " + channel,
 				requireInteraction: true,
-				tag: "invite," + msg.prefix.name + "," + channel,
+				tag: "invite,server=" + serverID + ",from=" + msg.prefix.name + ",channel=" + channel,
 				actions: [{
 					action: "accept",
 					title: "Accept",
 				}],
 			});
-			notif.addEventListener("click", (event) => {
-				if (event.action === "accept") {
-					this.setReceipt(bufName, ReceiptType.READ, msg);
-					this.open(channel, serverID);
-				} else {
-					// TODO: scroll to message
-					this.switchBuffer({ server: serverID, name: bufName });
-				}
-			});
+			if (notif) {
+				notif.addEventListener("click", (event) => {
+					if (event.action === "accept") {
+						let stored = {
+							name: bufName,
+							server: client.params,
+							receipts: { [ReceiptType.READ]: receiptFromMessage(msg) },
+						};
+						if (this.bufferStore.put(stored)) {
+							this.sendReadReceipt(client, stored);
+						}
+						this.open(channel, serverID);
+					} else {
+						// TODO: scroll to message
+						this.switchBuffer({ server: serverID, name: bufName });
+					}
+				});
+			}
 		}
 
 		// Open a new buffer if the message doesn't come from me or is a
@@ -566,36 +694,46 @@ export default class App extends Component {
 			this.createBuffer(serverID, bufName);
 		}
 
-		this.setReceipt(bufName, ReceiptType.DELIVERED, msg);
-
 		let bufID = { server: serverID, name: bufName };
 		this.setState((state) => State.addMessage(state, msg, bufID));
 		this.setBufferState(bufID, (buf) => {
 			// TODO: set unread if scrolled up
 			let unread = buf.unread;
 			let prevReadReceipt = buf.prevReadReceipt;
+			let receipts = { [ReceiptType.DELIVERED]: receiptFromMessage(msg) };
 
 			if (this.state.activeBuffer !== buf.id) {
 				unread = Unread.union(unread, msgUnread);
 			} else {
-				this.setReceipt(bufName, ReceiptType.READ, msg);
+				receipts[ReceiptType.READ] = receiptFromMessage(msg);
 			}
 
 			// Don't show unread marker for my own messages
-			if (client.isMyNick(msg.prefix.name)) {
-				prevReadReceipt = { time: msg.tags.time };
+			if (client.isMyNick(msg.prefix.name) && !isMessageBeforeReceipt(msg, prevReadReceipt)) {
+				prevReadReceipt = receiptFromMessage(msg);
 			}
 
-			this.bufferStore.put({
+			let stored = {
 				name: buf.name,
 				server: client.params,
 				unread,
-			});
+				receipts,
+			};
+			if (this.bufferStore.put(stored)) {
+				this.sendReadReceipt(client, stored);
+			}
 			return { unread, prevReadReceipt };
 		});
 	}
 
 	connect(params) {
+		// Merge our previous connection params so that config options such as
+		// the ping interval are applied
+		params = {
+			...this.state.connectParams,
+			...params,
+		};
+
 		let serverID = null;
 		this.setState((state) => {
 			let update;
@@ -604,7 +742,10 @@ export default class App extends Component {
 		});
 		this.setState({ connectParams: params });
 
-		let client = new Client(fillConnectParams(params));
+		let client = new Client({
+			...fillConnectParams(params),
+			eventPlayback: this.state.settings.bufferEvents !== BufferEventsDisplayMode.HIDE,
+		});
 		client.debug = this.debug;
 
 		this.clients.set(serverID, client);
@@ -652,10 +793,6 @@ export default class App extends Component {
 
 		if (params.autojoin.length > 0) {
 			this.switchToChannel = params.autojoin[0];
-		}
-
-		if (this.config.server && typeof this.config.server.ping !== "undefined") {
-			client.setPingInterval(this.config.server.ping);
 		}
 	}
 
@@ -710,11 +847,27 @@ export default class App extends Component {
 				if (client.cm(msg.prefix.name) === client.cm(client.serverPrefix.name)) {
 					target = SERVER_BUFFER;
 				} else {
-					target = msg.prefix.name;
+					let context = msg.tags['+draft/channel-context'];
+					if (context && client.isChannel(context) && State.getBuffer(this.state, { server: serverID, name: context })) {
+						target = context;
+					} else {
+						target = msg.prefix.name;
+					}
 				}
 			}
-			if (msg.command === "NOTICE" && !State.getBuffer(this.state, { server: serverID, name: target })) {
-				// Don't open a new buffer if this is just a NOTICE
+
+			// Don't open a new buffer if this is just a NOTICE or a garbage
+			// CTCP message
+			let openNewBuffer = true;
+			if (msg.command !== "PRIVMSG") {
+				openNewBuffer = false;
+			} else {
+				let ctcp = irc.parseCTCP(msg);
+				if (ctcp && ctcp.command !== "ACTION") {
+					openNewBuffer = false;
+				}
+			}
+			if (!openNewBuffer && !State.getBuffer(this.state, { server: serverID, name: target })) {
 				target = SERVER_BUFFER;
 			}
 
@@ -817,6 +970,7 @@ export default class App extends Component {
 		case irc.RPL_MONONLINE:
 		case irc.RPL_MONOFFLINE:
 		case irc.RPL_SASLSUCCESS:
+		case irc.RPL_CHANNEL_URL:
 		case "AWAY":
 		case "SETNAME":
 		case "CHGHOST":
@@ -830,6 +984,7 @@ export default class App extends Component {
 		case "CHATHISTORY":
 		case "ACK":
 		case "BOUNCER":
+		case "MARKREAD":
 			// Ignore these
 			return [];
 		default:
@@ -840,31 +995,18 @@ export default class App extends Component {
 	handleMessage(serverID, msg) {
 		let client = this.clients.get(serverID);
 
-		let destBuffers = this.routeMessage(serverID, msg);
-
 		if (irc.findBatchByType(msg, "chathistory")) {
-			destBuffers.forEach((bufName) => {
-				this.addMessage(serverID, bufName, msg);
-			});
-			return;
+			return; // Handled by the caller
 		}
+
+		let destBuffers = this.routeMessage(serverID, msg);
 
 		this.setState((state) => State.handleMessage(state, msg, serverID, client));
 
 		let target, channel;
 		switch (msg.command) {
 		case irc.RPL_WELCOME:
-			let lastReceipt = this.latestReceipt(ReceiptType.DELIVERED);
-			if (lastReceipt && lastReceipt.time && client.caps.enabled.has("draft/chathistory") && (!client.caps.enabled.has("soju.im/bouncer-networks") || client.params.bouncerNetwork)) {
-				let now = irc.formatDate(new Date());
-				client.fetchHistoryTargets(now, lastReceipt.time).then((targets) => {
-					targets.forEach((target) => {
-						let from = lastReceipt;
-						let to = { time: msg.tags.time || now };
-						this.fetchBacklog(client, target.name, from, to);
-					});
-				});
-			}
+			this.fetchBacklog(serverID);
 			break;
 		case irc.RPL_ENDOFMOTD:
 		case irc.ERR_NOMOTD:
@@ -923,14 +1065,6 @@ export default class App extends Component {
 				this.switchToChannel = null;
 			}
 			break;
-		case "PART":
-			channel = msg.params[0];
-
-			if (client.isMyNick(msg.prefix.name)) {
-				this.receipts.delete(channel);
-				this.saveReceipts();
-			}
-			break;
 		case "BOUNCER":
 			if (msg.params[0] !== "NETWORK") {
 				break; // We're only interested in network updates
@@ -950,16 +1084,12 @@ export default class App extends Component {
 
 			let isNew = false;
 			this.setState((state) => {
-				let bouncerNetworks = new Map(state.bouncerNetworks);
 				if (!attrs) {
-					bouncerNetworks.delete(id);
+					return State.deleteBouncerNetwork(state, id);
 				} else {
-					let prev = bouncerNetworks.get(id);
-					isNew = prev === undefined;
-					attrs = { ...prev, ...attrs };
-					bouncerNetworks.set(id, attrs);
+					isNew = !state.bouncerNetworks.has(id);
+					return State.storeBouncerNetwork(state, id, attrs);
 				}
-				return { bouncerNetworks };
 			}, () => {
 				if (!attrs) {
 					let serverID = this.serverFromBouncerNetwork(id);
@@ -1004,6 +1134,55 @@ export default class App extends Component {
 				this.autoOpenURL = null;
 			}
 			break;
+		case "MARKREAD":
+			target = msg.params[0];
+			let bound = msg.params[1];
+			if (bound === "*" || !bound.startsWith("timestamp=")) {
+				break;
+			}
+			let readReceipt = { time: bound.replace("timestamp=", "") };
+			let stored = this.bufferStore.get({ name: target, server: client.params });
+			if (isReceiptBefore(readReceipt, getReceipt(stored, ReceiptType.READ))) {
+				break;
+			}
+			for (let notif of this.messageNotifications) {
+				if (client.cm(notif.data.bufferName) !== client.cm(target)) {
+					continue;
+				}
+				if (isMessageBeforeReceipt(notif.data.message, readReceipt)) {
+					notif.close();
+				}
+			}
+			this.setBufferState({ server: serverID, name: target }, (buf) => {
+				// Re-compute unread status
+				let unread = Unread.NONE;
+				for (let i = buf.messages.length - 1; i >= 0; i--) {
+					let msg = buf.messages[i];
+					if (msg.command !== "PRIVMSG" && msg.command !== "NOTICE") {
+						continue;
+					}
+					if (isMessageBeforeReceipt(msg, readReceipt)) {
+						break;
+					}
+
+					if (msg.isHighlight || client.isMyNick(buf.name)) {
+						unread = Unread.HIGHLIGHT;
+						break;
+					}
+
+					unread = Unread.MESSAGE;
+				}
+
+				this.bufferStore.put({
+					name: target,
+					server: client.params,
+					unread,
+					receipts: { [ReceiptType.READ]: readReceipt },
+				});
+
+				return { unread };
+			});
+			break;
 		default:
 			if (irc.isError(msg.command) && msg.command != irc.ERR_NOMOTD) {
 				let description = msg.params[msg.params.length - 1];
@@ -1013,6 +1192,63 @@ export default class App extends Component {
 
 		destBuffers.forEach((bufName) => {
 			this.addMessage(serverID, bufName, msg);
+		});
+	}
+
+	fetchBacklog(serverID) {
+		let client = this.clients.get(serverID);
+		if (!client.caps.enabled.has("draft/chathistory")) {
+			return;
+		}
+		if (client.caps.enabled.has("soju.im/bouncer-networks") && !client.params.bouncerNetwork) {
+			return;
+		}
+
+		let lastReceipt = getLatestReceipt(this.bufferStore, client.params, ReceiptType.DELIVERED);
+		if (!lastReceipt) {
+			return;
+		}
+
+		let now = irc.formatDate(new Date());
+		client.fetchHistoryTargets(now, lastReceipt.time).then((targets) => {
+			targets.forEach((target) => {
+				let from = lastReceipt;
+				let to = { time: now };
+
+				// Maybe we've just received a READ update from the
+				// server, avoid over-fetching history
+				let stored = this.bufferStore.get({ name: target.name, server: client.params });
+				let readReceipt = getReceipt(stored, ReceiptType.READ);
+				if (isReceiptBefore(from, readReceipt)) {
+					from = readReceipt;
+				}
+
+				// If we already have messages stored for the target,
+				// fetch all messages we've missed
+				let buf = State.getBuffer(this.state, { server: serverID, name: target.name });
+				if (buf && buf.messages.length > 0) {
+					let lastMsg = buf.messages[buf.messages.length - 1];
+					from = receiptFromMessage(lastMsg);
+				}
+
+				// Query read marker if this is a user (ie, we haven't received
+				// the read marker as part of a JOIN burst)
+				if (client.supportsReadMarker() && client.isNick(target.name)) {
+					client.fetchReadMarker(target.name);
+				}
+
+				client.fetchHistoryBetween(target.name, from, to, CHATHISTORY_MAX_SIZE).then((result) => {
+					for (let msg of result.messages) {
+						let destBuffers = this.routeMessage(serverID, msg);
+						for (let bufName of destBuffers) {
+							this.addMessage(serverID, bufName, msg);
+						}
+					}
+				}).catch((err) => {
+					console.error("Failed to fetch backlog for '" + target.name + "': ", err);
+					this.showError("Failed to fetch backlog for '" + target.name + "'");
+				});
+			});
 		});
 	}
 
@@ -1104,15 +1340,6 @@ export default class App extends Component {
 		this.open(nick);
 	}
 
-	fetchBacklog(client, target, after, before) {
-		client.fetchHistoryBetween(target, after, before, CHATHISTORY_MAX_SIZE).catch((err) => {
-			console.error("Failed to fetch backlog for '" + target + "': ", err);
-			this.showError("Failed to fetch backlog for '" + target + "'");
-			this.receipts.delete(target);
-			this.saveReceipts();
-		});
-	}
-
 	whoUserBuffer(target, serverID) {
 		let client = this.clients.get(serverID);
 
@@ -1120,9 +1347,23 @@ export default class App extends Component {
 			fields: ["flags", "hostname", "nick", "realname", "username", "account"],
 		});
 		client.monitor(target);
+
+		if (client.supportsReadMarker()) {
+			client.fetchReadMarker(target);
+		}
 	}
 
-	open(target, serverID) {
+	whoChannelBuffer(target, serverID) {
+		let client = this.clients.get(serverID);
+
+		client.who(target, {
+			fields: ["flags", "hostname", "nick", "realname", "username", "account"],
+		}).then(() => {
+			this.setBufferState({ name: target, server: serverID }, { hasInitialWho: true });
+		});
+	}
+
+	open(target, serverID, password) {
 		if (!serverID) {
 			serverID = State.getActiveServerID(this.state);
 		}
@@ -1132,7 +1373,7 @@ export default class App extends Component {
 			this.switchBuffer({ server: serverID });
 		} else if (client.isChannel(target)) {
 			this.switchToChannel = target;
-			client.join(target).catch((err) => {
+			client.join(target, password).catch((err) => {
 				this.showError(err);
 			});
 		} else {
@@ -1207,7 +1448,9 @@ export default class App extends Component {
 			}
 			// fallthrough
 		case BufferType.NICK:
-			this.switchBuffer({ name: SERVER_BUFFER });
+			if (this.state.activeBuffer === buf.id) {
+				this.switchBuffer({ name: SERVER_BUFFER });
+			}
 			this.setState((state) => {
 				let buffers = new Map(state.buffers);
 				buffers.delete(buf.id);
@@ -1216,12 +1459,13 @@ export default class App extends Component {
 
 			client.unmonitor(buf.name);
 
-			this.receipts.delete(buf.name);
-			this.saveReceipts();
-
 			this.bufferStore.delete({ name: buf.name, server: client.params });
 			break;
 		}
+	}
+
+	disconnectAll() {
+		this.close(this.state.buffers.keys().next().value);
 	}
 
 	executeCommand(s) {
@@ -1419,6 +1663,9 @@ export default class App extends Component {
 
 		client.fetchHistoryBefore(buf.name, before, limit).then((result) => {
 			this.endOfHistory.set(buf.id, !result.more);
+			for (let msg of result.messages) {
+				this.addMessage(buf.server, buf.name, msg);
+			}
 		});
 	}
 
@@ -1581,13 +1828,39 @@ export default class App extends Component {
 		this.dismissDialog();
 	}
 
+	handleOpenSettingsClick() {
+		let showProtocolHandler = false;
+		for (let [id, client] of this.clients) {
+			if (client.caps.enabled.has("soju.im/bouncer-networks")) {
+				showProtocolHandler = true;
+				break;
+			}
+		}
+
+		this.openDialog("settings", { showProtocolHandler });
+	}
+
+	handleSettingsChange(settings) {
+		store.settings.put(settings);
+		this.setState({ settings });
+	}
+
 	componentDidMount() {
+		this.baseTitle = document.title;
 		setupKeybindings(this);
+	}
+
+	componentWillUnmount() {
+		document.title = this.baseTitle;
 	}
 
 	render() {
 		if (this.state.loading) {
-			return html`<section id="connect"></section>`;
+			let error = null;
+			if (this.state.error) {
+				error = html`<form><p class="error-text">${this.state.error}</p></form>`;
+			}
+			return html`<section id="connect">${error}</section>`;
 		}
 
 		let activeBuffer = null, activeServer = null, activeBouncerNetwork = null;
@@ -1637,6 +1910,7 @@ export default class App extends Component {
 						onReconnect=${() => this.reconnect()}
 						onAddNetwork=${this.handleAddNetworkClick}
 						onManageNetwork=${() => this.handleManageNetworkClick(activeBuffer.server)}
+						onOpenSettings=${this.handleOpenSettingsClick}
 					/>
 				</section>
 			`;
@@ -1745,6 +2019,19 @@ export default class App extends Component {
 				</>
 			`;
 			break;
+		case "settings":
+			dialog = html`
+				<${Dialog} title="Settings" onDismiss=${this.dismissDialog}>
+					<${SettingsForm}
+						settings=${this.state.settings}
+						showProtocolHandler=${dialogData.showProtocolHandler}
+						onChange=${this.handleSettingsChange}
+						onDisconnect=${() => this.disconnectAll()}
+						onClose=${() => this.dismissDialog()}
+					/>
+				</>
+			`;
+			break;
 		}
 
 		let error = null;
@@ -1763,12 +2050,16 @@ export default class App extends Component {
 			composerReadOnly = true;
 		}
 
-		let commandOnly = false
+		let commandOnly = false;
+		let privmsgMaxLen;
 		if (activeBuffer && activeBuffer.type === BufferType.SERVER) {
-			commandOnly = true
+			commandOnly = true;
+		} else if (activeBuffer) {
+			let client = this.clients.get(activeBuffer.server);
+			privmsgMaxLen = irc.getMaxPrivmsgLen(client.isupport, client.nick, activeBuffer.name);
 		}
 
-		return html`
+		let app = html`
 			<section
 					id="buffer-list"
 					class=${this.state.openPanels.bufferList ? "expand" : ""}
@@ -1801,6 +2092,7 @@ export default class App extends Component {
 						buffer=${activeBuffer}
 						server=${activeServer}
 						bouncerNetwork=${activeBouncerNetwork}
+						settings=${this.state.settings}
 						onChannelClick=${this.handleChannelClick}
 						onNickClick=${this.handleNickClick}
 						onAuthClick=${() => this.handleAuthClick(activeBuffer.server)}
@@ -1816,9 +2108,16 @@ export default class App extends Component {
 				onSubmit=${this.handleComposerSubmit}
 				autocomplete=${this.autocomplete}
 				commandOnly=${commandOnly}
+				maxLen=${privmsgMaxLen}
 			/>
 			${dialog}
 			${error}
+		`;
+
+		return html`
+			<${SettingsContext.Provider} value=${this.state.settings}>
+				${app}
+			</>
 		`;
 	}
 }

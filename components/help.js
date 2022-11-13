@@ -26,27 +26,27 @@ function KeyBindingsHelp() {
 		`;
 	});
 
-	return html`
-		<dl>
-			<dt><kbd>/</kbd></dt>
-			<dd>Start writing a command</dd>
+	if (!window.matchMedia("(pointer: none)").matches) {
+		l.push(html`
+			<dt><strong>Middle mouse click</strong></dt>
+			<dd>Close buffer</dd>
+		`);
+	}
 
-			${l}
-		</dl>
-	`;
+	return html`<dl>${l}</dl>`;
 }
 
 function CommandsHelp() {
 	let l = Object.keys(commands).map((name) => {
 		let cmd = commands[name];
 
-		let usage = "/" + name;
+		let usage = [html`<strong>/${name}</strong>`];
 		if (cmd.usage) {
-			usage += " " + cmd.usage;
+			usage.push(" " + cmd.usage);
 		}
 
 		return html`
-			<dt><strong><code>${usage}</code></strong></dt>
+			<dt><code>${usage}</code></dt>
 			<dd>${cmd.description}</dd>
 		`;
 	});

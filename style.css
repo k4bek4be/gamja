@@ -158,6 +158,9 @@ button.danger:hover {
 	color: white;
 	background-color: var(--gray);
 }
+#buffer-list li.error a {
+	color: red;
+}
 #buffer-list li.unread-message a {
 	color: #b37400;
 }
@@ -186,7 +189,7 @@ button.danger:hover {
 	grid-column: 2;
 
 	display: grid;
-	grid-template-rows: auto auto;
+	grid-template-rows: 1fr auto;
 	grid-template-columns: 1fr auto;
 }
 
@@ -202,6 +205,9 @@ button.danger:hover {
 	padding: 5px 10px;
 	grid-row: 2;
 	grid-column: 1;
+	max-height: 20vh;
+	overflow-y: auto;
+	word-break: break-word;
 }
 
 #buffer-header .actions {
@@ -349,6 +355,8 @@ form input[type="url"],
 form input[type="email"] {
 	box-sizing: border-box;
 	width: 100%;
+	font-family: inherit;
+	font-size: inherit;
 }
 
 a {
@@ -528,6 +536,14 @@ details summary[role="button"] {
 }
 .dialog form {
 	overflow: auto; /* hack to clear floating elements */
+}
+
+.dialog .protocol-handler {
+	display: flex;
+	flex-direction: row;
+}
+.dialog .protocol-handler .left {
+	flex-grow: 1;
 }
 
 kbd {

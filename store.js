@@ -1,3 +1,5 @@
+import { ReceiptType } from "./state.js";
+
 const PREFIX = "gamja_";
 
 class Item {
@@ -24,18 +26,18 @@ class Item {
 
 export const autoconnect = new Item("autoconnect");
 export const naggedProtocolHandler = new Item("naggedProtocolHandler");
+export const settings = new Item("settings");
 
-const rawReceipts = new Item("receipts");
-
-export const receipts = {
-	load() {
-		let v = rawReceipts.load();
-		return new Map(Object.entries(v || {}));
-	},
-	put(m) {
-		rawReceipts.put(Object.fromEntries(m));
-	},
-};
+function debounce(f, delay) {
+	let timeout = null;
+	return (...args) => {
+		clearTimeout(timeout);
+		timeout = setTimeout(() => {
+			timeout = null;
+			f(...args);
+		}, delay);
+	};
+}
 
 export class Buffer {
 	raw = new Item("buffers");
@@ -44,14 +46,24 @@ export class Buffer {
 	constructor() {
 		let obj = this.raw.load();
 		this.m = new Map(Object.entries(obj || {}));
+
+		let saveImmediately = this.save.bind(this);
+		this.save = debounce(saveImmediately, 500);
+
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState === "hidden") {
+				saveImmediately();
+			}
+		});
 	}
 
 	key(buf) {
+		// TODO: use case-mapping here somehow
 		return JSON.stringify({
-			name: buf.name,
+			name: buf.name.toLowerCase(),
 			server: {
 				url: buf.server.url,
-				nick: buf.server.nick,
+				nick: buf.server.nick.toLowerCase(),
 				bouncerNetwork: buf.server.bouncerNetwork,
 			},
 		});
@@ -72,14 +84,39 @@ export class Buffer {
 	put(buf) {
 		let key = this.key(buf);
 
-		let prev = this.m.get(key);
-		if (prev && prev.unread === buf.unread) {
-			return;
+		let updated = !this.m.has(key);
+		let prev = this.m.get(key) || {};
+
+		let unread = prev.unread;
+		if (buf.unread !== undefined && buf.unread !== prev.unread) {
+			unread = buf.unread;
+			updated = true;
+		}
+
+		let receipts = { ...prev.receipts };
+		if (buf.receipts) {
+			Object.keys(buf.receipts).forEach((k) => {
+				// Use a not-equals comparison here so that no-op receipt
+				// changes are correctly handled
+				if (!receipts[k] || receipts[k].time < buf.receipts[k].time) {
+					receipts[k] = buf.receipts[k];
+					updated = true;
+				}
+			});
+			if (receipts[ReceiptType.DELIVERED] < receipts[ReceiptType.READ]) {
+				receipts[ReceiptType.DELIVERED] = receipts[ReceiptType.READ];
+				updated = true;
+			}
+		}
+
+		if (!updated) {
+			return false;
 		}
 
 		this.m.set(this.key(buf), {
 			name: buf.name,
-			unread: buf.unread,
+			unread,
+			receipts,
 			server: {
 				url: buf.server.url,
 				nick: buf.server.nick,
@@ -88,6 +125,7 @@ export class Buffer {
 		});
 
 		this.save();
+		return true;
 	}
 
 	delete(buf) {

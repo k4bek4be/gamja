@@ -167,7 +167,7 @@ export default class Composer extends Component {
 			return;
 		}
 
-		let text = event.clipboardData.getData('text');
+		let text = event.clipboardData.getData("text");
 
 		event.preventDefault();
 		event.stopImmediatePropagation();
@@ -222,6 +222,7 @@ export default class Composer extends Component {
 					placeholder=${placeholder}
 					enterkeyhint="send"
 					onKeyDown=${this.handleInputKeyDown}
+					maxlength=${this.props.maxLen}
 				/>
 			</form>
 		`;

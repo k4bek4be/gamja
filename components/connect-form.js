@@ -63,6 +63,8 @@ export default class ConnectForm extends Component {
 			};
 		} else if (this.props.auth === "external") {
 			params.saslExternal = true;
+		} else if (this.props.auth === "oauth2") {
+			params.saslOauthBearer = this.props.params.saslOauthBearer;
 		}
 
 		if (this.state.autojoin) {
@@ -110,7 +112,7 @@ export default class ConnectForm extends Component {
 		}
 
 		let auth = null;
-		if (this.props.auth !== "disabled" && this.props.auth !== "external") {
+		if (this.props.auth !== "disabled" && this.props.auth !== "external" && this.props.auth !== "oauth2") {
 			auth = html`
 				<label>
 					Password:<br/>
@@ -138,7 +140,7 @@ export default class ConnectForm extends Component {
 						name="autojoin"
 						checked=${this.state.autojoin}
 					/>
-					Auto-join channel${s} <strong>${channels.join(', ')}</strong>
+					Auto-join channel${s} <strong>${channels.join(", ")}</strong>
 				</label>
 				<br/><br/>
 			`;
@@ -157,6 +159,7 @@ export default class ConnectForm extends Component {
 						disabled=${disabled}
 						ref=${this.nickInput}
 						required
+						autofocus
 					/>
 				</label>
 				<br/><br/>
@@ -210,7 +213,7 @@ export default class ConnectForm extends Component {
 					<label>
 						Server password:<br/>
 						<input
-							type="text"
+							type="password"
 							name="pass"
 							value=${this.state.pass}
 							disabled=${disabled}
