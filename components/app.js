@@ -397,6 +397,20 @@ export default class App extends Component {
 			return;
 		}
 
+		var authMethods = serverMetadata.token_endpoint_auth_methods_supported || ["client_secret_basic"];
+		var authMethodErr = null;
+		if (this.config.oauth2.client_secret && !authMethods.includes("client_secret_basic")) {
+			authMethodErr = "OAuth 2.0 server doesn't support HTTP basic authentication on the token endpoint";
+		}
+		if (!this.config.oauth2.client_secret && !authMethods.includes("none")) {
+			authMethodErr = "OAuth 2.0 server doesn't support public clients on the token endpoint";
+		}
+		if (authMethodErr) {
+			console.error(authMethodErr);
+			this.showError(authMethodErr);
+			return;
+		}
+
 		oauth2.redirectAuthorize({
 			serverMetadata,
 			clientId: this.config.oauth2.client_id,
