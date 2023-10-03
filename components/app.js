@@ -1873,8 +1873,8 @@ export default class App extends Component {
 			// By this point, bouncer-networks-notify should've advertised
 			// the new network
 			let serverID = this.serverFromBouncerNetwork(id);
-			let client = this.clients.get(serverID);
-			client.params.autojoin = [autojoin];
+			let newClient = this.clients.get(serverID);
+			newClient.params.autojoin = [autojoin];
 
 			this.switchToChannel = autojoin;
 		}
