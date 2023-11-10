@@ -660,7 +660,7 @@ export default class Buffer extends Component {
 		let hasUnreadSeparator = false;
 		let prevDate = new Date();
 		let foldMessages = [];
-		let hasMonitor = false;
+		let lastMonitor = null;
 		buf.messages.forEach((msg) => {
 			let sep = [];
 
@@ -668,9 +668,12 @@ export default class Buffer extends Component {
 				return;
 			}
 
-			if (!hasMonitor && (msg.command === irc.RPL_MONONLINE || msg.command === irc.RPL_MONOFFLINE)) {
-				hasMonitor = true;
-				return;
+			if (msg.command === irc.RPL_MONONLINE || msg.command === irc.RPL_MONOFFLINE) {
+				let skip = !lastMonitor || msg.command === lastMonitor;
+				lastMonitor = msg.command;
+				if (skip) {
+					return;
+				}
 			}
 
 			if (!hasUnreadSeparator && buf.type != BufferType.SERVER && !isMessageBeforeReceipt(msg, buf.prevReadReceipt)) {
